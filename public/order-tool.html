@@ -215,6 +215,7 @@ table.pt input:focus{outline:none;border-color:var(--blue);background:#fff;box-s
     <div class="mg">
       <div class="f"><label>Ordered by</label><input id="orderedBy" placeholder="Your name"></div>
       <div class="f"><label>Reference</label><input id="reference" placeholder="e.g. Dean Private"></div>
+      <div class="f"><label>ServiceM8 Job #</label><input id="sm8JobNumber" placeholder="e.g. 1136" inputmode="numeric"></div>
       <div class="f"><label>Order date</label><input id="orderDate" type="date"></div>
       <div class="f full">
         <label>Supplier</label>
@@ -266,7 +267,8 @@ table.pt input:focus{outline:none;border-color:var(--blue);background:#fff;box-s
     <button type="button" class="btn bg" id="clearBtn">Clear all</button>
   </div>
   <p class="enote np">
-    "Email order" opens your email app pre-filled. Sketches can't attach automatically —
+    "Email order" opens your email app pre-filled. "Post order to ServiceM8 job diary" needs the
+    Job # filled in above. Sketches can't attach automatically to either —
     use "Print / Save as PDF" first and attach that file.
   </p>
 
@@ -866,53 +868,48 @@ document.getElementById('emailBtn').onclick=()=>{
 };
 
 // ─────────────────────────────────────────────
-// SERVICEM8 ADD-ON INTEGRATION
-// This block only activates when the page is served by the JSJ ServiceM8
-// add-on backend (which injects window.__SM8_PREFILL__). Opening this file
-// normally — locally, or from any other host — leaves this dormant and
-// makes no external calls.
+// SERVICEM8 JOB DIARY INTEGRATION
+// Posts the order straight onto a ServiceM8 job's diary as a Note, by
+// looking the job up via its Job #. Works whether this page was opened
+// from the "Order materials" button on a job card, or just as a normal
+// bookmarked page — same as the "Email order" button, this is a plain
+// button someone clicks when ready.
+// window.__SM8_BACKEND__ is injected by the server when this page is
+// served through the add-on; falls back to the same Railway URL so the
+// standalone downloaded copy of this file works identically.
 // ─────────────────────────────────────────────
-if(window.__SM8_PREFILL__){
-  const pf=window.__SM8_PREFILL__;
-  // prefill what we can from the job
-  if(pf.reference) document.getElementById('reference').value=pf.reference;
-  if(pf.jobAddress){
-    const siteTog=document.querySelector('.tog[data-v="site"]');
-    if(siteTog) siteTog.click();
-    if(addrIn){ addrIn.value=pf.jobAddress; addrIn.dispatchEvent(new Event('input')); }
+const SM8_BACKEND=window.__SM8_BACKEND__||'https://jsj-order-tool-production.up.railway.app';
+const sm8Btn=document.createElement('button');
+sm8Btn.type='button';
+sm8Btn.className='btn bp';
+sm8Btn.textContent='Post order to ServiceM8 job diary';
+document.querySelector('.acts').insertBefore(sm8Btn,document.getElementById('emailBtn'));
+
+sm8Btn.onclick=async()=>{
+  const jobNumber=document.getElementById('sm8JobNumber').value.trim();
+  if(!jobNumber){
+    alert('Enter the ServiceM8 Job # first (top of the form) so this can be saved to the right job.');
+    return;
   }
-
-  const sdk=document.createElement('script');
-  sdk.src='https://platform.servicem8.com/sdk/1.0/sdk.js';
-  sdk.onload=()=>{
-    const client=window.SMClient.init();
-    if(client.resizeWindow) client.resizeWindow(900,960);
-
-    const sm8Btn=document.createElement('button');
-    sm8Btn.type='button';
-    sm8Btn.className='btn bp';
+  const{body}=buildOrderSummary();
+  sm8Btn.disabled=true;
+  sm8Btn.textContent='Posting…';
+  try{
+    const r=await fetch(SM8_BACKEND+'/submit-order',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({jobNumber,note:body})
+    });
+    const data=await r.json();
+    if(!r.ok||!data.success) throw new Error(data.error||'Unknown error');
+    sm8Btn.textContent='Posted ✓';
+    setTimeout(()=>{sm8Btn.disabled=false;sm8Btn.textContent='Post order to ServiceM8 job diary';},2500);
+  }catch(err){
+    sm8Btn.disabled=false;
     sm8Btn.textContent='Post order to ServiceM8 job diary';
-    const acts=document.querySelector('.acts');
-    acts.insertBefore(sm8Btn,acts.firstChild);
-
-    sm8Btn.onclick=()=>{
-      const{body}=buildOrderSummary();
-      sm8Btn.disabled=true;
-      sm8Btn.textContent='Posting…';
-      client.invoke('jsj_order_tool_submit',{jobUUID:pf.jobUUID,noteText:body})
-        .then(()=>{
-          sm8Btn.textContent='Posted ✓';
-          setTimeout(()=>{ if(client.closeWindow) client.closeWindow(); },900);
-        })
-        .catch(err=>{
-          sm8Btn.disabled=false;
-          sm8Btn.textContent='Post order to ServiceM8 job diary';
-          alert('Could not post to the job diary: '+(err&&err.message?err.message:err));
-        });
-    };
-  };
-  document.head.appendChild(sdk);
-}
+    alert('Could not post to the job diary: '+err.message);
+  }
+};
 })();
 </script>
 </body>
