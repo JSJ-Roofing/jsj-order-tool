@@ -178,10 +178,10 @@ async function handleOpen(event, res) {
   // trim a bit more size off the response.
   html = html.replace(/<!--[\s\S]*?-->/g, '').replace(/\n\s*\n/g, '\n');
 
-  // Trying a simpler envelope shape than the Lambda-style one — ServiceM8's
-  // exact expected format for self-hosted web service responses isn't
-  // published, so this is our second attempt at guessing it correctly.
-  res.json({ html });
+  // {html: ...} was accepted as valid JSON (no more parse error) but showed
+  // nothing — so the field name is wrong, not the overall shape. Trying the
+  // plain Lambda convention "body" next.
+  res.json({ body: html });
 }
 
 async function handleSubmit(event, res) {
