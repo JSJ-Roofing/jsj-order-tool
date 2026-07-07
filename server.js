@@ -161,9 +161,22 @@ async function handleOpen(event, res) {
 
   const template = fs.readFileSync(path.join(__dirname, 'public', 'order-tool.html'), 'utf8');
   const inject = `<script>window.__SM8_PREFILL__ = ${JSON.stringify(prefill)};</script>`;
-  const html = template.includes('<head>')
+  let html = template.includes('<head>')
     ? template.replace('<head>', `<head>\n${inject}`)
     : inject + template;
+
+  // The standalone file embeds the logo as base64 for offline portability,
+  // which makes the page ~80KB+. ServiceM8 relays this response back to the
+  // browser and appears to have a size limit, so swap the heavy embedded
+  // image for a lightweight link to the same logo already hosted on GitHub.
+  html = html.replace(
+    /<img class="hdr-logo" src="data:image\/png;base64,[^"]+"/,
+    '<img class="hdr-logo" src="https://raw.githubusercontent.com/JSJ-Roofing/jsj-order-tool/main/jsj-addon-icon.png"'
+  );
+
+  // Light minification — strip HTML comments and collapse blank lines to
+  // trim a bit more size off the response.
+  html = html.replace(/<!--[\s\S]*?-->/g, '').replace(/\n\s*\n/g, '\n');
 
   res.set('Content-Type', 'text/html').send(html);
 }
