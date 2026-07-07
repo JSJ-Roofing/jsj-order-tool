@@ -1,23 +1,19 @@
 // JSJ Roofing — ServiceM8 add-on backend
 //
-// This service does three jobs:
-//   1. /oauth/start + /oauth/callback  — connects this add-on to your
-//      ServiceM8 account once, and stores the resulting access/refresh
+// Architecture (simplified to match a pattern already proven to work):
+//   1. /oauth/start + /oauth/callback — one-time connection between this
+//      server and your ServiceM8 account (OAuth). Stores the resulting
 //      tokens so this server can call the ServiceM8 API on your behalf.
-//   2. POST /addon                      — the Callback URL ServiceM8 hits
-//      whenever someone clicks the add-on's button on a Job Card. Verifies
-//      the signed request, looks up the job + client, and serves the order
-//      tool pre-filled with that job's details.
-//   3. Handles the "submit" event fired from inside the tool, which posts
-//      the finished order onto that job's diary as a Note.
-//
-// Deploy this whole folder to Railway (Deploy from GitHub repo), set the
-// environment variables from .env.example in Railway's Variables tab, then
-// point your ServiceM8 add-on's Activation URL and Callback URL at this
-// service. See README.md for the exact steps.
+//   2. GET /order-tool — serves the order tool itself as a normal web page.
+//      The Job Card button opens this directly via the manifest's
+//      "actionURL" (no embedded-iframe rendering, no special response
+//      format needed — it's just a link).
+//   3. POST /submit-order — called directly by the order tool's own
+//      JavaScript (a normal fetch, not routed through ServiceM8) once
+//      someone fills in a Job # and clicks "Post to ServiceM8 job diary".
+//      Looks the job up by its job number and posts a Note onto it.
 
 const express = require('express');
-const jwt = require('jsonwebtoken');
 const fs = require('fs');
 const path = require('path');
 
@@ -35,11 +31,12 @@ if (!SM8_APP_ID || !SM8_APP_SECRET || !PUBLIC_BASE_URL) {
 }
 
 const app = express();
+app.use(express.json());
 
 // ── token storage ──
 // Single-tenant (just your ServiceM8 account), so a simple JSON file is
-// enough. Attach a Railway Volume mounted at /data so this survives
-// redeploys — otherwise you'll need to reconnect after every deploy.
+// enough. Without a persistent Volume mounted at /data, this resets on
+// every redeploy — if so, just revisit /oauth/start once to reconnect.
 function loadTokens() {
   try { return JSON.parse(fs.readFileSync(TOKENS_FILE, 'utf8')); }
   catch (e) { return null; }
@@ -115,89 +112,63 @@ app.get('/oauth/callback', async (req, res) => {
       code,
       redirect_uri: `${PUBLIC_BASE_URL}/oauth/callback`,
     });
-    res.send('<h2>✅ JSJ Order Tool is connected to ServiceM8.</h2><p>You can close this tab and try the add-on button on a job card.</p>');
+    res.send('<h2>✅ JSJ Order Tool is connected to ServiceM8.</h2><p>You can close this tab.</p>');
   } catch (e) {
     res.status(500).send('OAuth exchange failed: ' + e.message);
   }
 });
 
-// ── Step 3: Callback URL — job-card button clicks & follow-up events ──
-// ServiceM8 posts a JWT (signed with your App Secret) as the raw request body.
-app.post('/addon', express.text({ type: '*/*' }), async (req, res) => {
-  let event;
-  try {
-    event = jwt.verify(req.body, SM8_APP_SECRET, { algorithms: ['HS256'] });
-  } catch (e) {
-    return res.status(401).send('Invalid signature');
-  }
+// ── Step 3: the order tool itself, opened via the Job Card button ──
+app.get('/order-tool', (req, res) => {
+  let html = fs.readFileSync(path.join(__dirname, 'public', 'order-tool.html'), 'utf8');
 
-  try {
-    if (event.eventName === 'jsj_order_tool_open') return await handleOpen(event, res);
-    if (event.eventName === 'jsj_order_tool_submit') return await handleSubmit(event, res);
-    res.status(400).json({ error: 'Unknown event: ' + event.eventName });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-async function handleOpen(event, res) {
-  const jobUUID = event.eventArgs && event.eventArgs.jobUUID;
-  if (!jobUUID) return res.status(400).send('Missing job UUID');
-
-  const jobRes = await sm8(`job/${jobUUID}.json`);
-  const job = jobRes.body || {};
-  let company = {};
-  if (job.company_uuid) {
-    const companyRes = await sm8(`company/${job.company_uuid}.json`);
-    company = companyRes.body || {};
-  }
-
-  const prefill = {
-    jobUUID,
-    jobAddress: job.job_address || '',
-    reference: [company.name, job.generated_job_id].filter(Boolean).join(' — '),
-  };
-
-  const template = fs.readFileSync(path.join(__dirname, 'public', 'order-tool.html'), 'utf8');
-  const inject = `<script>window.__SM8_PREFILL__ = ${JSON.stringify(prefill)};</script>`;
-  let html = template.includes('<head>')
-    ? template.replace('<head>', `<head>\n${inject}`)
-    : inject + template;
-
-  // The standalone file embeds the logo as base64 for offline portability,
-  // which makes the page ~80KB+. ServiceM8 relays this response back to the
-  // browser and appears to have a size limit, so swap the heavy embedded
-  // image for a lightweight link to the same logo already hosted on GitHub.
+  // Swap the offline base64-embedded logo for the lightweight hosted copy.
   html = html.replace(
     /<img class="hdr-logo" src="data:image\/png;base64,[^"]+"/,
     '<img class="hdr-logo" src="https://raw.githubusercontent.com/JSJ-Roofing/jsj-order-tool/main/jsj-addon-icon.png"'
   );
 
-  // Light minification — strip HTML comments and collapse blank lines to
-  // trim a bit more size off the response.
-  html = html.replace(/<!--[\s\S]*?-->/g, '').replace(/\n\s*\n/g, '\n');
+  // Tell the page which backend to call for "Post to ServiceM8 job diary".
+  const inject = `<script>window.__SM8_BACKEND__ = ${JSON.stringify(PUBLIC_BASE_URL)};</script>`;
+  html = html.includes('<head>') ? html.replace('<head>', `<head>\n${inject}`) : inject + html;
 
-  // {html: ...} was accepted as valid JSON (no more parse error) but showed
-  // nothing — so the field name is wrong, not the overall shape. Trying the
-  // plain Lambda convention "body" next.
-  res.json({ body: html });
+  res.set('Content-Type', 'text/html').send(html);
+});
+
+// ── Step 4: called directly by the order tool's own JS when someone clicks
+//    "Post to ServiceM8 job diary". Looks the job up by its job number and
+//    posts a Note onto it. ──
+function cors(req, res, next) {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Headers', 'Content-Type');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
 }
+app.options('/submit-order', cors);
+app.post('/submit-order', cors, async (req, res) => {
+  try {
+    const { jobNumber, note } = req.body || {};
+    if (!jobNumber || !note) return res.status(400).json({ error: 'Missing jobNumber or note' });
 
-async function handleSubmit(event, res) {
-  const { jobUUID, noteText } = event.eventArgs || {};
-  if (!jobUUID || !noteText) return res.status(400).json({ error: 'Missing jobUUID/noteText' });
+    const lookup = await sm8(`job.json?$filter=generated_job_id eq '${encodeURIComponent(jobNumber)}'`);
+    if (!Array.isArray(lookup.body) || lookup.body.length === 0) {
+      return res.status(404).json({ error: `No ServiceM8 job found matching "${jobNumber}"` });
+    }
+    const jobUUID = lookup.body[0].uuid;
 
-  const r = await sm8('note.json', {
-    method: 'POST',
-    body: JSON.stringify({
-      related_object: 'job',
-      related_object_uuid: jobUUID,
-      note: noteText,
-    }),
-  });
-  res.json({ ok: r.status >= 200 && r.status < 300, status: r.status, body: r.body });
-}
+    const noteRes = await sm8('note.json', {
+      method: 'POST',
+      body: JSON.stringify({ related_object: 'job', related_object_uuid: jobUUID, note }),
+    });
+    if (noteRes.status < 200 || noteRes.status >= 300) {
+      return res.status(500).json({ error: 'Note creation failed', details: noteRes.body });
+    }
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 app.get('/', (req, res) => res.send('JSJ ServiceM8 order add-on is running.'));
 
