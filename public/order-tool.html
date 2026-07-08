@@ -7,8 +7,6 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <style>
 :root{
   --green:#a2c354; --green-h:#91b343; --green-a:#82a33a;
@@ -191,29 +189,6 @@ table.pt input:focus{outline:none;border-color:var(--blue);background:#fff;box-s
   .f input{border:none !important;border-bottom:1px solid #999 !important;border-radius:0 !important;padding:3px 2px !important;box-shadow:none !important;background:transparent !important;}
   .sc{background-image:linear-gradient(to right,#e2e4dc 1px,transparent 1px),linear-gradient(to bottom,#e2e4dc 1px,transparent 1px) !important;border:1px solid #ccc !important;}
 }
-
-/* PDF CAPTURE — same rules as @media print above, but applied via a class
-   so html2canvas (which does not evaluate @media print) renders identically
-   to what the print stylesheet produces. Keep these two blocks in sync. */
-body.pdf-capture{background:#fff !important;}
-body.pdf-capture .np{display:none !important;}
-body.pdf-capture .po{display:inline !important;}
-body.pdf-capture .hdr{border-bottom:4px solid #a2c354 !important;box-shadow:none !important;padding:20px 24px !important;}
-body.pdf-capture .ic{border-left:4px solid #a2c354 !important;box-shadow:none !important;}
-body.pdf-capture .inum{background:#082b51 !important;color:#fff !important;}
-body.pdf-capture table.pt th{background:#082b51 !important;color:#fff !important;}
-body.pdf-capture .st{color:#0654a6 !important;}
-body.pdf-capture .hdr-brand{color:#082b51 !important;}
-body.pdf-capture .card{box-shadow:none !important;border:1px solid #ccc !important;}
-body.pdf-capture .f input{border:none !important;border-bottom:1px solid #999 !important;border-radius:0 !important;padding:3px 2px !important;box-shadow:none !important;background:transparent !important;}
-body.pdf-capture .sc{background-image:linear-gradient(to right,#e2e4dc 1px,transparent 1px),linear-gradient(to bottom,#e2e4dc 1px,transparent 1px) !important;border:1px solid #ccc !important;}
-body.pdf-capture .app{padding:0 24px !important;}
-/* html2canvas can't rasterise real <input> values well, so capture swaps
-   inputs for a text span carrying the same value (see toPDF() in the script) */
-body.pdf-capture .pdf-input-swap{
-  display:inline-block;border:none;border-bottom:1px solid #999;padding:3px 2px;
-  font-family:inherit;font-size:1rem;color:var(--text);min-height:20px;width:100%;
-}
 </style>
 </head>
 <body>
@@ -287,15 +262,14 @@ body.pdf-capture .pdf-input-swap{
   </div>
 
   <div class="acts np">
-    <button type="button" class="btn bp" id="sendBtn">Send order (diary + email)</button>
-    <button type="button" class="btn bs" id="pdfBtn">Download PDF</button>
+    <button type="button" class="btn bp" id="sendBtn">Send order (email + ServiceM8 diary)</button>
+    <button type="button" class="btn bs" id="printBtn">Print</button>
     <button type="button" class="btn bg" id="clearBtn">Clear all</button>
   </div>
-  <p class="enote np" id="enoteText">
-    "Send order" builds a PDF of this order, posts it to the ServiceM8 job diary with the PDF
-    attached (needs the Job # filled in above), and emails the supplier the order with the same
-    PDF attached — all in one click. "Download PDF" just saves a copy to this device without
-    sending anything.
+  <p class="enote np">
+    "Send order" does three things at once: downloads a PDF of this order, opens your email app with
+    it ready to attach, and — if a ServiceM8 Job # is filled in above — posts the order and that same
+    PDF onto that job's diary.
   </p>
 
   <datalist id="cols">
@@ -311,6 +285,44 @@ body.pdf-capture .pdf-input-swap{
   </datalist>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script>
+// generates a real, downloadable/attachable PDF of the order form —
+// doesn't depend on the browser's own print dialog having a "Save as PDF"
+// destination (some locked-down setups don't show one).
+async function generateOrderPDF(){
+  const target=document.querySelector('.app');
+  const canvas=await html2canvas(target,{
+    scale:2,
+    useCORS:true,
+    backgroundColor:'#ffffff',
+    ignoreElements:el=>el.classList&&el.classList.contains('np')
+  });
+  const{jsPDF}=window.jspdf;
+  const pdf=new jsPDF({unit:'pt',format:'a4'});
+  const pageW=pdf.internal.pageSize.getWidth();
+  const pageH=pdf.internal.pageSize.getHeight();
+  const imgW=pageW;
+  const imgH=canvas.height*imgW/canvas.width;
+  const imgData=canvas.toDataURL('image/png');
+  let heightLeft=imgH,position=0;
+  pdf.addImage(imgData,'PNG',0,position,imgW,imgH);
+  heightLeft-=pageH;
+  while(heightLeft>0){
+    position=heightLeft-imgH;
+    pdf.addPage();
+    pdf.addImage(imgData,'PNG',0,position,imgW,imgH);
+    heightLeft-=pageH;
+  }
+  return pdf.output('blob');
+}
+function pdfFilename(){
+  const ref=(document.getElementById('reference').value||'order').replace(/[^a-z0-9]+/gi,'-');
+  const d=document.getElementById('orderDate').value||new Date().toISOString().slice(0,10);
+  return `JSJ-Order-${ref}-${d}.pdf`;
+}
+</script>
 <script>
 (function(){
 const NS='http://www.w3.org/2000/svg';
@@ -848,120 +860,15 @@ function addRow(){
 document.getElementById('addRow').onclick=addRow;
 addRow();
 
+// print (still handy for anyone whose browser does offer Save as PDF here)
+document.getElementById('printBtn').onclick=()=>{syncD();window.print();};
+
 // clear
 document.getElementById('clearBtn').onclick=()=>{
   if(!confirm('Clear the whole order?'))return;
-  ['reference','supplierName','supplierEmail','orderedBy','deliverAddr','deliveryDate'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  ['reference','supplierName','supplierEmail','orderedBy','deliverAddr','deliveryDate','sm8JobNumber'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   itemsEl.innerHTML='';ic=0;buildItem(1);
   pb.innerHTML='';addRow();
-};
-
-// ─────────────────────────────────────────────
-// PDF GENERATION
-// Renders the whole order (header, fields, sketches, materials table) exactly
-// as it appears on screen into a real, downloadable multi-page PDF — using
-// html2canvas + jsPDF, entirely in the browser. This replaces window.print(),
-// which depends on the device/browser offering a "Save as PDF" print
-// destination — something that isn't reliable on tablets, in embedded
-// webviews, or in some in-app browsers. This approach always produces an
-// actual .pdf file, no OS print dialog involved.
-// ─────────────────────────────────────────────
-async function buildOrderPDF(){
-  const app=document.querySelector('.app');
-
-  // html2canvas can't reliably rasterise live <input> values, so swap every
-  // visible input for a plain text span carrying the same value, capture,
-  // then swap back.
-  const liveInputs=Array.from(app.querySelectorAll('input')).filter(el=>el.offsetParent!==null);
-  const swaps=liveInputs.map(el=>{
-    const span=document.createElement('span');
-    span.className='pdf-input-swap';
-    span.textContent=el.value||'';
-    span.style.width=getComputedStyle(el).width;
-    el.parentNode.insertBefore(span,el);
-    el.style.display='none';
-    return{el,span};
-  });
-
-  // Record the vertical extent (in canvas pixel space, matching the scale
-  // used below) of blocks that shouldn't be sliced across a page break —
-  // sketch cards, the header, the materials table, etc. This mirrors the
-  // page-break-inside:avoid rule the old print-based version relied on,
-  // which doesn't apply here since we're rasterising to one tall image
-  // and cutting it mechanically rather than letting the browser paginate.
-  const scale=2;
-  const appTop=app.getBoundingClientRect().top;
-  const avoidBlocks=Array.from(app.querySelectorAll('.hdr,.card,.meta-card,.ic,table.pt')).map(el=>{
-    const r=el.getBoundingClientRect();
-    return{top:(r.top-appTop)*scale,bottom:(r.bottom-appTop)*scale};
-  });
-
-  document.body.classList.add('pdf-capture');
-  let canvas;
-  try{
-    canvas=await html2canvas(app,{scale,backgroundColor:'#ffffff',useCORS:true});
-  }finally{
-    document.body.classList.remove('pdf-capture');
-    swaps.forEach(({el,span})=>{el.style.display='';span.remove();});
-  }
-
-  const{jsPDF}=window.jspdf;
-  const doc=new jsPDF({unit:'pt',format:'a4'});
-  const pageW=doc.internal.pageSize.getWidth();
-  const pageH=doc.internal.pageSize.getHeight();
-  const imgW=pageW;
-  const imgH=canvas.height*(imgW/canvas.width);
-  const imgData=canvas.toDataURL('image/jpeg',0.92);
-
-  if(imgH<=pageH){
-    doc.addImage(imgData,'JPEG',0,0,imgW,imgH);
-  }else{
-    // slice the tall canvas across multiple A4 pages, nudging each break
-    // point earlier if it would otherwise cut through the middle of a
-    // sketch card (or other "don't split" block) that started on this page
-    const pxPerPage=canvas.width*(pageH/imgW);
-    let renderedPx=0,page=0;
-    while(renderedPx<canvas.height){
-      let breakAt=Math.min(renderedPx+pxPerPage,canvas.height);
-      for(const b of avoidBlocks){
-        if(b.top<breakAt && b.bottom>breakAt && b.top>renderedPx && b.bottom-b.top<pxPerPage){
-          breakAt=b.top;
-        }
-      }
-      const sliceH=Math.max(1,breakAt-renderedPx);
-      const sliceCanvas=document.createElement('canvas');
-      sliceCanvas.width=canvas.width;
-      sliceCanvas.height=sliceH;
-      sliceCanvas.getContext('2d').drawImage(canvas,0,renderedPx,canvas.width,sliceH,0,0,canvas.width,sliceH);
-      const sliceData=sliceCanvas.toDataURL('image/jpeg',0.92);
-      if(page>0)doc.addPage();
-      doc.addImage(sliceData,'JPEG',0,0,imgW,sliceH*(imgW/canvas.width));
-      renderedPx+=sliceH;
-      page++;
-    }
-  }
-  return doc;
-}
-
-function pdfFilename(){
-  const ref=(document.getElementById('reference').value||'order').replace(/[^a-z0-9-]+/gi,'_');
-  const oDate=document.getElementById('orderDate').value||new Date().toISOString().slice(0,10);
-  return `JSJ-Order-${ref}-${oDate}.pdf`;
-}
-
-// standalone "Download PDF" button
-document.getElementById('pdfBtn').onclick=async()=>{
-  const btn=document.getElementById('pdfBtn');
-  btn.disabled=true;const orig=btn.textContent;btn.textContent='Generating PDF…';
-  try{
-    syncD();
-    const doc=await buildOrderPDF();
-    doc.save(pdfFilename());
-  }catch(err){
-    alert('Could not generate the PDF: '+err.message);
-  }finally{
-    btn.disabled=false;btn.textContent=orig;
-  }
 };
 
 // shared order-summary text builder (used by email + ServiceM8 diary post)
@@ -987,88 +894,78 @@ function buildOrderSummary(){
     const unit=tr.querySelector('.pu').value;
     if(desc)body+=`  ${qty}${unit?' '+unit:''} — ${desc}\n`;
   });
-  body+=`\n${'─'.repeat(40)}\nSketches: see attached PDF.\n\nJSJ Roofing · (02) 9627 3232 · info@jsjroofing.com.au`;
+  body+=`\n${'─'.repeat(40)}\nSketches: attached as a PDF (also downloaded to this device — attach it to this email before sending).\n\nJSJ Roofing · (02) 9627 3232 · info@jsjroofing.com.au`;
   return{ref,oDate,body};
 }
 
+function blobToBase64(blob){
+  return new Promise((resolve,reject)=>{
+    const r=new FileReader();
+    r.onload=()=>resolve(r.result.split(',')[1]);
+    r.onerror=reject;
+    r.readAsDataURL(blob);
+  });
+}
+
 // ─────────────────────────────────────────────
-// SEND ORDER — merged flow (diary post + email in one click)
-// Generates the PDF, then sends everything to the backend in one call:
-// the backend looks up the job, posts the text note to the job diary,
-// attaches the PDF to that job's diary/files, and sends the supplier email
-// with the PDF attached via SMTP — all server-side, so no download or
-// mailto popup is needed here.
-// window.__SM8_BACKEND__ is injected by the server when this page is served
-// through the add-on; falls back to the same Railway URL so the standalone
-// downloaded copy of this file works identically.
+// SEND ORDER — one button, three things:
+//  1. generates a real PDF of the order and downloads it
+//  2. opens the email app, ready to send (PDF needs attaching manually —
+//     browsers don't allow JS to attach files to a mailto: email)
+//  3. if a ServiceM8 Job # is filled in, posts the order + that same PDF
+//     onto that job's diary automatically
+// window.__SM8_BACKEND__ is injected by the server when this page is
+// served through the add-on; falls back to the same Railway URL so the
+// standalone downloaded copy of this file works identically.
 // ─────────────────────────────────────────────
 const SM8_BACKEND=window.__SM8_BACKEND__||'https://jsj-order-tool-production.up.railway.app';
+const sendBtn=document.getElementById('sendBtn');
 
-document.getElementById('sendBtn').onclick=async()=>{
-  const btn=document.getElementById('sendBtn');
-  const jobNumber=document.getElementById('sm8JobNumber').value.trim();
-  if(!jobNumber){
-    alert('Enter the ServiceM8 Job # first (top of the form) so this can be saved to the right job.');
-    return;
-  }
-  const sEmail=document.getElementById('supplierEmail').value.trim();
-  if(!sEmail){
-    alert('Enter the supplier email first (in the Supplier section).');
-    return;
-  }
-
-  const orig=btn.textContent;
-  btn.disabled=true;
+sendBtn.onclick=async()=>{
+  sendBtn.disabled=true;
+  const originalLabel=sendBtn.textContent;
+  sendBtn.textContent='Generating PDF…';
   try{
     syncD();
-    btn.textContent='Generating PDF…';
-    const doc=await buildOrderPDF();
+    const pdfBlob=await generateOrderPDF();
     const filename=pdfFilename();
-    const pdfBase64=doc.output('datauristring').split(',')[1];
 
-    btn.textContent='Sending…';
+    // 1. download the PDF locally
+    const url=URL.createObjectURL(pdfBlob);
+    const a=document.createElement('a');
+    a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),4000);
+
+    // 2. post to ServiceM8 diary, if a Job # is filled in
+    const jobNumber=document.getElementById('sm8JobNumber').value.trim();
     const{ref,oDate,body}=buildOrderSummary();
-    const r=await fetch(SM8_BACKEND+'/submit-order',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        jobNumber,
-        note:body,
-        pdfBase64,
-        pdfFilename:filename,
-        supplierEmail:sEmail,
-        subject:`Material Order — ${ref} — ${oDate}`,
-      })
-    });
-    const data=await r.json();
-    if(!r.ok||!data.success) throw new Error(data.error||'Unknown error');
-
-    // The diary note itself always succeeds if we got this far. The PDF
-    // attachment and the email are reported separately, since either one
-    // can fail independently (e.g. email not configured yet) without the
-    // core diary post failing.
-    const problems=[];
-    if(!data.diaryAttachment) problems.push('PDF attachment to the diary'+(data.diaryAttachmentError?': '+data.diaryAttachmentError:''));
-    if(!data.email) problems.push('supplier email'+(data.emailError?': '+data.emailError:''));
-
-    // Always log the raw attachment debug info — this shows exactly what
-    // ServiceM8 returned at each step (create / upload / reactivate / verify),
-    // which is what actually explains whether the file will show up, even
-    // when the backend thinks it succeeded.
-    if(data.diaryAttachmentDebug) console.log('Attachment debug:',data.diaryAttachmentDebug);
-
-    if(problems.length){
-      btn.textContent='Posted, with issues ⚠';
-      alert('Order posted to the job diary, but this part failed:\n\n'+problems.join('\n')+'\n\nDebug info:\n'+JSON.stringify(data.diaryAttachmentDebug,null,2)+'\n\nAsk whoever manages the backend to check the logs.');
-    }else{
-      btn.textContent='Sent ✓';
-      if(data.diaryAttachmentDebug) alert('Sent — attachment debug info (for troubleshooting):\n\n'+JSON.stringify(data.diaryAttachmentDebug,null,2));
+    if(jobNumber){
+      sendBtn.textContent='Posting to ServiceM8…';
+      try{
+        const pdfBase64=await blobToBase64(pdfBlob);
+        const r=await fetch(SM8_BACKEND+'/submit-order',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({jobNumber,note:body,pdfBase64,pdfFilename:filename})
+        });
+        const data=await r.json();
+        if(!r.ok||!data.success) throw new Error(data.error||'Unknown error');
+        if(data.attachment&&data.attachment.attempted&&!data.attachment.success){
+          console.warn('Diary note posted, but the PDF attachment failed:',data.attachment.error);
+        }
+      }catch(err){
+        alert('Order emailed, but could not post to the ServiceM8 job diary: '+err.message);
+      }
     }
-    setTimeout(()=>{btn.disabled=false;btn.textContent=orig;},3000);
+
+    // 3. open the email app
+    const sEmail=document.getElementById('supplierEmail').value;
+    window.location.href=`mailto:${encodeURIComponent(sEmail)}?subject=${encodeURIComponent(`Material Order — ${ref} — ${oDate}`)}&body=${encodeURIComponent(body)}`;
   }catch(err){
-    btn.disabled=false;
-    btn.textContent=orig;
-    alert('Could not send the order: '+err.message);
+    alert('Something went wrong building the order: '+err.message);
+  }finally{
+    sendBtn.disabled=false;
+    sendBtn.textContent=originalLabel;
   }
 };
 })();
