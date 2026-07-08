@@ -292,9 +292,10 @@ body.pdf-capture .pdf-input-swap{
     <button type="button" class="btn bg" id="clearBtn">Clear all</button>
   </div>
   <p class="enote np" id="enoteText">
-    "Send order" builds a PDF of this order, posts it to the ServiceM8 job diary (needs the Job #
-    filled in above), downloads the PDF to this device, and opens your email app with the order
-    pre-filled and ready to send — attach the downloaded PDF before hitting send in Outlook.
+    "Send order" builds a PDF of this order, posts it to the ServiceM8 job diary with the PDF
+    attached (needs the Job # filled in above), and emails the supplier the order with the same
+    PDF attached — all in one click. "Download PDF" just saves a copy to this device without
+    sending anything.
   </p>
 
   <datalist id="cols">
@@ -855,33 +856,6 @@ document.getElementById('clearBtn').onclick=()=>{
   pb.innerHTML='';addRow();
 };
 
-// shared order-summary text builder (used by email + ServiceM8 diary post)
-function buildOrderSummary(){
-  const ref=document.getElementById('reference').value||'(no reference)';
-  const by=document.getElementById('orderedBy').value||'(not set)';
-  const oDate=document.getElementById('orderDate').value;
-  const delivTo=document.querySelector('.tog.on').dataset.v==='store'
-    ?'Store':'Job site — '+(addrIn.value||'(address not set)');
-  const dDate=document.getElementById('deliveryDate').value||'(not set)';
-  let body=`Material Order — JSJ Roofing\n${'─'.repeat(40)}\nReference: ${ref}\nOrdered by: ${by}\nOrder date: ${oDate}\nDeliver to: ${delivTo}\nDelivery date: ${dDate}\n\nFLASHINGS:\n`;
-  document.querySelectorAll('.ic').forEach((c,i)=>{
-    const col=c.querySelector('.fc').value||'?';
-    const qty=c.querySelector('.fq').value||'?';
-    const len=c.querySelector('.fl').value||'?';
-    const notes=c.querySelector('.fn').value;
-    body+=`  ${i+1}. ${col} — ${qty} @ ${len}mm${notes?' — '+notes:''}\n     [see attached sketch]\n`;
-  });
-  body+=`\nOTHER MATERIALS:\n`;
-  pb.querySelectorAll('tr').forEach(tr=>{
-    const qty=tr.querySelector('.pq').value||'?';
-    const desc=tr.querySelector('.pd').value;
-    const unit=tr.querySelector('.pu').value;
-    if(desc)body+=`  ${qty}${unit?' '+unit:''} — ${desc}\n`;
-  });
-  body+=`\n${'─'.repeat(40)}\nSketches: see attached PDF.\n\nJSJ Roofing · (02) 9627 3232 · info@jsjroofing.com.au`;
-  return{ref,oDate,body};
-}
-
 // ─────────────────────────────────────────────
 // PDF GENERATION
 // Renders the whole order (header, fields, sketches, materials table) exactly
@@ -992,25 +966,17 @@ function buildOrderSummary(){
     const unit=tr.querySelector('.pu').value;
     if(desc)body+=`  ${qty}${unit?' '+unit:''} — ${desc}\n`;
   });
-  body+=`\n${'─'.repeat(40)}\nSketches: see attached PDF (downloaded to this device — attach it before sending).\n\nJSJ Roofing · (02) 9627 3232 · info@jsjroofing.com.au`;
+  body+=`\n${'─'.repeat(40)}\nSketches: see attached PDF.\n\nJSJ Roofing · (02) 9627 3232 · info@jsjroofing.com.au`;
   return{ref,oDate,body};
 }
 
 // ─────────────────────────────────────────────
 // SEND ORDER — merged flow (diary post + email in one click)
-// 1. Generates the PDF and downloads it to this device.
-// 2. Posts the order to the ServiceM8 job diary (needs Job # filled in).
-// 3. Opens Outlook (via mailto) pre-filled, ready for the PDF to be attached
-//    and sent.
-// mailto: links cannot attach files in any browser — that's a platform
-// limitation, not something fixable from this page. Until the backend is
-// updated to send email itself (with the PDF attached automatically and the
-// PDF attached to the diary note too, instead of just linked as text), this
-// is the closest thing to one click: the PDF is already downloaded and
-// named clearly by the time Outlook opens, so it's a single "attach + send".
-// The fetch payload below already includes pdfBase64/pdfFilename so that
-// once the backend supports it, this front end needs no further changes —
-// see BACKEND_TODO.md.
+// Generates the PDF, then sends everything to the backend in one call:
+// the backend looks up the job, posts the text note to the job diary,
+// attaches the PDF to that job's diary/files, and sends the supplier email
+// with the PDF attached via SMTP — all server-side, so no download or
+// mailto popup is needed here.
 // window.__SM8_BACKEND__ is injected by the server when this page is served
 // through the add-on; falls back to the same Railway URL so the standalone
 // downloaded copy of this file works identically.
@@ -1024,7 +990,7 @@ document.getElementById('sendBtn').onclick=async()=>{
     alert('Enter the ServiceM8 Job # first (top of the form) so this can be saved to the right job.');
     return;
   }
-  const sEmail=document.getElementById('supplierEmail').value;
+  const sEmail=document.getElementById('supplierEmail').value.trim();
   if(!sEmail){
     alert('Enter the supplier email first (in the Supplier section).');
     return;
@@ -1039,24 +1005,45 @@ document.getElementById('sendBtn').onclick=async()=>{
     const filename=pdfFilename();
     const pdfBase64=doc.output('datauristring').split(',')[1];
 
-    btn.textContent='Posting to job diary…';
+    btn.textContent='Sending…';
     const{ref,oDate,body}=buildOrderSummary();
     const r=await fetch(SM8_BACKEND+'/submit-order',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({jobNumber,note:body,pdfBase64,pdfFilename:filename})
+      body:JSON.stringify({
+        jobNumber,
+        note:body,
+        pdfBase64,
+        pdfFilename:filename,
+        supplierEmail:sEmail,
+        subject:`Material Order — ${ref} — ${oDate}`,
+      })
     });
     const data=await r.json();
     if(!r.ok||!data.success) throw new Error(data.error||'Unknown error');
 
-    btn.textContent='Downloading PDF…';
-    doc.save(filename);
+    // The diary note itself always succeeds if we got this far. The PDF
+    // attachment and the email are reported separately, since either one
+    // can fail independently (e.g. email not configured yet) without the
+    // core diary post failing.
+    const problems=[];
+    if(!data.diaryAttachment) problems.push('PDF attachment to the diary'+(data.diaryAttachmentError?': '+data.diaryAttachmentError:''));
+    if(!data.email) problems.push('supplier email'+(data.emailError?': '+data.emailError:''));
 
-    btn.textContent='Opening email…';
-    window.location.href=`mailto:${encodeURIComponent(sEmail)}?subject=${encodeURIComponent(`Material Order — ${ref} — ${oDate}`)}&body=${encodeURIComponent(body)}`;
+    // Always log the raw attachment debug info — this shows exactly what
+    // ServiceM8 returned at each step (create / upload / reactivate / verify),
+    // which is what actually explains whether the file will show up, even
+    // when the backend thinks it succeeded.
+    if(data.diaryAttachmentDebug) console.log('Attachment debug:',data.diaryAttachmentDebug);
 
-    btn.textContent='Posted ✓ — attach the downloaded PDF in Outlook';
-    setTimeout(()=>{btn.disabled=false;btn.textContent=orig;},4000);
+    if(problems.length){
+      btn.textContent='Posted, with issues ⚠';
+      alert('Order posted to the job diary, but this part failed:\n\n'+problems.join('\n')+'\n\nDebug info:\n'+JSON.stringify(data.diaryAttachmentDebug,null,2)+'\n\nAsk whoever manages the backend to check the logs.');
+    }else{
+      btn.textContent='Sent ✓';
+      if(data.diaryAttachmentDebug) alert('Sent — attachment debug info (for troubleshooting):\n\n'+JSON.stringify(data.diaryAttachmentDebug,null,2));
+    }
+    setTimeout(()=>{btn.disabled=false;btn.textContent=orig;},3000);
   }catch(err){
     btn.disabled=false;
     btn.textContent=orig;
