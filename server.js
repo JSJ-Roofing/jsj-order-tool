@@ -217,7 +217,6 @@ app.post('/submit-order', cors, async (req, res) => {
         });
         debug.createStatus = attachRes.status;
         debug.createBody = attachRes.body;
-        console.log('[attach] create response', attachRes.status, JSON.stringify(attachRes.body));
 
         const attachmentUUID = attachRes.headers && attachRes.headers.get('x-record-uuid');
         debug.attachmentUUID = attachmentUUID || null;
@@ -226,7 +225,6 @@ app.post('/submit-order', cors, async (req, res) => {
         const uploadRes = await sm8UploadFile(`Attachment/${attachmentUUID}.file`, pdfBuffer, pdfFilename, 'application/pdf');
         debug.uploadStatus = uploadRes.status;
         debug.uploadBody = uploadRes.body;
-        console.log('[attach] upload response', uploadRes.status, JSON.stringify(uploadRes.body));
         if (uploadRes.status < 200 || uploadRes.status >= 300) {
           throw new Error('File upload failed: ' + JSON.stringify(uploadRes.body));
         }
@@ -241,7 +239,6 @@ app.post('/submit-order', cors, async (req, res) => {
         });
         debug.reactivateStatus = reactivateRes.status;
         debug.reactivateBody = reactivateRes.body;
-        console.log('[attach] reactivate response', reactivateRes.status, JSON.stringify(reactivateRes.body));
         if (reactivateRes.status < 200 || reactivateRes.status >= 300) {
           throw new Error('Attachment uploaded but re-activation failed: ' + JSON.stringify(reactivateRes.body));
         }
@@ -251,13 +248,18 @@ app.post('/submit-order', cors, async (req, res) => {
         const verifyRes = await sm8(`Attachment/${attachmentUUID}.json`);
         debug.verifyStatus = verifyRes.status;
         debug.verifyBody = verifyRes.body;
-        console.log('[attach] verify response', verifyRes.status, JSON.stringify(verifyRes.body));
 
         result.diaryAttachment = true;
       } catch (e) {
         result.diaryAttachmentError = e.message;
       }
       result.diaryAttachmentDebug = debug;
+
+      // TEMPORARY DEBUGGING — full, untruncated, pretty-printed dump of the
+      // attachment debug trail and any error, in one log line each, so
+      // nothing gets cut off in Railway's log viewer.
+      console.log(JSON.stringify(result.diaryAttachmentDebug, null, 2));
+      console.log(result.diaryAttachmentError);
     }
 
     res.json(result);
