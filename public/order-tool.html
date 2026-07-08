@@ -267,9 +267,10 @@ table.pt input:focus{outline:none;border-color:var(--blue);background:#fff;box-s
     <button type="button" class="btn bg" id="clearBtn">Clear all</button>
   </div>
   <p class="enote np">
-    "Send order" does three things at once: downloads a PDF of this order, opens your email app with
-    it ready to attach, and — if a ServiceM8 Job # is filled in above — posts the order and that same
-    PDF onto that job's diary.
+    "Send order" does two things at once: if a ServiceM8 Job # is filled in above, it posts the order
+    and a PDF of this form onto that job's diary — and it opens your email app with the order text
+    ready to send (the PDF isn't attached automatically to the email — browsers don't allow that —
+    so use "Print / Save as PDF" first if you need to attach it there too).
   </p>
 
   <datalist id="cols">
@@ -894,7 +895,7 @@ function buildOrderSummary(){
     const unit=tr.querySelector('.pu').value;
     if(desc)body+=`  ${qty}${unit?' '+unit:''} — ${desc}\n`;
   });
-  body+=`\n${'─'.repeat(40)}\nSketches: attached as a PDF (also downloaded to this device — attach it to this email before sending).\n\nJSJ Roofing · (02) 9627 3232 · info@jsjroofing.com.au`;
+  body+=`\n${'─'.repeat(40)}\nSketches: attached to this job's ServiceM8 diary as a PDF. If you need it attached to this email too, use "Print / Save as PDF" and attach it manually.\n\nJSJ Roofing · (02) 9627 3232 · info@jsjroofing.com.au`;
   return{ref,oDate,body};
 }
 
@@ -930,11 +931,8 @@ sendBtn.onclick=async()=>{
     const pdfBlob=await generateOrderPDF();
     const filename=pdfFilename();
 
-    // 1. download the PDF locally
-    const url=URL.createObjectURL(pdfBlob);
-    const a=document.createElement('a');
-    a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();
-    setTimeout(()=>URL.revokeObjectURL(url),4000);
+    // (no local download — the PDF goes straight to the ServiceM8 diary
+    // as an attachment instead; see step below)
 
     // 2. post to ServiceM8 diary, if a Job # is filled in
     const jobNumber=document.getElementById('sm8JobNumber').value.trim();
