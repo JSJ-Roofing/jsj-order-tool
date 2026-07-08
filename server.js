@@ -120,6 +120,7 @@ app.get('/oauth/callback', async (req, res) => {
 
 // ── Step 3: the order tool itself, opened via the Job Card button ──
 app.get('/order-tool', (req, res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
   let html = fs.readFileSync(path.join(__dirname, 'public', 'order-tool.html'), 'utf8');
 
   // Swap the offline base64-embedded logo for the lightweight hosted copy.
