@@ -233,6 +233,10 @@ app.post('/submit-order', cors, async (req, res) => {
     // 3. Attach the PDF to the job (shows in Diary + Files) — failure here doesn't fail the request
     if (pdfBuffer && pdfFilename) {
       try {
+        // ServiceM8 wants a timestamp on the attachment record — some accounts
+        // reject/ignore the upload step without one.
+        const nowStamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
+
         const attachRes = await sm8('Attachment.json', {
           method: 'POST',
           body: JSON.stringify({
@@ -241,6 +245,7 @@ app.post('/submit-order', cors, async (req, res) => {
             attachment_name: pdfFilename,
             file_type: '.pdf',
             active: true,
+            timestamp: nowStamp,
           }),
         });
         const attachmentUUID = attachRes.headers && attachRes.headers.get('x-record-uuid');
@@ -250,6 +255,19 @@ app.post('/submit-order', cors, async (req, res) => {
         if (uploadRes.status < 200 || uploadRes.status >= 300) {
           throw new Error('File upload failed: ' + JSON.stringify(uploadRes.body));
         }
+
+        // Known ServiceM8 behaviour: uploading the file flips the attachment's
+        // `active` flag back to 0 server-side, even though the upload call
+        // itself reports success — which hides it from the Diary/Files tab.
+        // Explicitly re-activate the record after the upload to make it visible.
+        const reactivateRes = await sm8(`Attachment/${attachmentUUID}.json`, {
+          method: 'POST',
+          body: JSON.stringify({ active: true }),
+        });
+        if (reactivateRes.status < 200 || reactivateRes.status >= 300) {
+          throw new Error('Attachment uploaded but re-activation failed: ' + JSON.stringify(reactivateRes.body));
+        }
+
         result.diaryAttachment = true;
       } catch (e) {
         result.diaryAttachmentError = e.message;
