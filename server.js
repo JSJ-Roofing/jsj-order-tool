@@ -232,6 +232,7 @@ app.post('/submit-order', cors, async (req, res) => {
 
     // 3. Attach the PDF to the job (shows in Diary + Files) — failure here doesn't fail the request
     if (pdfBuffer && pdfFilename) {
+      const debug = { jobUUID, pdfBytes: pdfBuffer.length };
       try {
         // ServiceM8 wants a timestamp on the attachment record — some accounts
         // reject/ignore the upload step without one.
@@ -248,10 +249,18 @@ app.post('/submit-order', cors, async (req, res) => {
             timestamp: nowStamp,
           }),
         });
+        debug.createStatus = attachRes.status;
+        debug.createBody = attachRes.body;
+        console.log('[attach] create response', attachRes.status, JSON.stringify(attachRes.body));
+
         const attachmentUUID = attachRes.headers && attachRes.headers.get('x-record-uuid');
+        debug.attachmentUUID = attachmentUUID || null;
         if (!attachmentUUID) throw new Error('No attachment UUID returned: ' + JSON.stringify(attachRes.body));
 
         const uploadRes = await sm8UploadFile(`Attachment/${attachmentUUID}.file`, pdfBuffer, pdfFilename, 'application/pdf');
+        debug.uploadStatus = uploadRes.status;
+        debug.uploadBody = uploadRes.body;
+        console.log('[attach] upload response', uploadRes.status, JSON.stringify(uploadRes.body));
         if (uploadRes.status < 200 || uploadRes.status >= 300) {
           throw new Error('File upload failed: ' + JSON.stringify(uploadRes.body));
         }
@@ -264,14 +273,25 @@ app.post('/submit-order', cors, async (req, res) => {
           method: 'POST',
           body: JSON.stringify({ active: true }),
         });
+        debug.reactivateStatus = reactivateRes.status;
+        debug.reactivateBody = reactivateRes.body;
+        console.log('[attach] reactivate response', reactivateRes.status, JSON.stringify(reactivateRes.body));
         if (reactivateRes.status < 200 || reactivateRes.status >= 300) {
           throw new Error('Attachment uploaded but re-activation failed: ' + JSON.stringify(reactivateRes.body));
         }
+
+        // Read the record back to confirm what ServiceM8 actually has stored —
+        // this is the real proof of whether it will show up in the UI.
+        const verifyRes = await sm8(`Attachment/${attachmentUUID}.json`);
+        debug.verifyStatus = verifyRes.status;
+        debug.verifyBody = verifyRes.body;
+        console.log('[attach] verify response', verifyRes.status, JSON.stringify(verifyRes.body));
 
         result.diaryAttachment = true;
       } catch (e) {
         result.diaryAttachmentError = e.message;
       }
+      result.diaryAttachmentDebug = debug;
     }
 
     // 4. Email the supplier the order with the PDF attached — also independent of the above
