@@ -883,10 +883,23 @@ async function buildOrderPDF(){
     return{el,span};
   });
 
+  // Record the vertical extent (in canvas pixel space, matching the scale
+  // used below) of blocks that shouldn't be sliced across a page break —
+  // sketch cards, the header, the materials table, etc. This mirrors the
+  // page-break-inside:avoid rule the old print-based version relied on,
+  // which doesn't apply here since we're rasterising to one tall image
+  // and cutting it mechanically rather than letting the browser paginate.
+  const scale=2;
+  const appTop=app.getBoundingClientRect().top;
+  const avoidBlocks=Array.from(app.querySelectorAll('.hdr,.card,.meta-card,.ic,table.pt')).map(el=>{
+    const r=el.getBoundingClientRect();
+    return{top:(r.top-appTop)*scale,bottom:(r.bottom-appTop)*scale};
+  });
+
   document.body.classList.add('pdf-capture');
   let canvas;
   try{
-    canvas=await html2canvas(app,{scale:2,backgroundColor:'#ffffff',useCORS:true});
+    canvas=await html2canvas(app,{scale,backgroundColor:'#ffffff',useCORS:true});
   }finally{
     document.body.classList.remove('pdf-capture');
     swaps.forEach(({el,span})=>{el.style.display='';span.remove();});
@@ -903,11 +916,19 @@ async function buildOrderPDF(){
   if(imgH<=pageH){
     doc.addImage(imgData,'JPEG',0,0,imgW,imgH);
   }else{
-    // slice the tall canvas across multiple A4 pages
+    // slice the tall canvas across multiple A4 pages, nudging each break
+    // point earlier if it would otherwise cut through the middle of a
+    // sketch card (or other "don't split" block) that started on this page
     const pxPerPage=canvas.width*(pageH/imgW);
     let renderedPx=0,page=0;
     while(renderedPx<canvas.height){
-      const sliceH=Math.min(pxPerPage,canvas.height-renderedPx);
+      let breakAt=Math.min(renderedPx+pxPerPage,canvas.height);
+      for(const b of avoidBlocks){
+        if(b.top<breakAt && b.bottom>breakAt && b.top>renderedPx && b.bottom-b.top<pxPerPage){
+          breakAt=b.top;
+        }
+      }
+      const sliceH=Math.max(1,breakAt-renderedPx);
       const sliceCanvas=document.createElement('canvas');
       sliceCanvas.width=canvas.width;
       sliceCanvas.height=sliceH;
