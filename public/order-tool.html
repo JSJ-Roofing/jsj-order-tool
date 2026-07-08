@@ -211,8 +211,9 @@ body.pdf-capture .app{padding:0 24px !important;}
 /* html2canvas can't rasterise real <input> values well, so capture swaps
    inputs for a text span carrying the same value (see toPDF() in the script) */
 body.pdf-capture .pdf-input-swap{
-  display:inline-block;border:none;border-bottom:1px solid #999;padding:3px 2px;
-  font-family:inherit;font-size:1rem;color:var(--text);min-height:20px;width:100%;
+  display:flex;align-items:flex-end;box-sizing:border-box;border:none;border-bottom:1px solid #999;
+  padding:0 2px 2px;font-family:inherit;font-size:1rem;line-height:1;color:var(--text);height:22px;width:100%;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
 </style>
 </head>
@@ -871,33 +872,51 @@ async function buildOrderPDF(){
 
   // html2canvas can't reliably rasterise live <input> values, so swap every
   // visible input for a plain text span carrying the same value, capture,
-  // then swap back.
+  // then swap back. Width is intentionally left to the .pdf-input-swap CSS
+  // rule (width:100% of its own field) rather than being captured here —
+  // capturing a fixed pixel width from the on-screen layout, before the
+  // pdf-capture class reflows the grid, previously caused each span to be
+  // sized for the wrong layout and its underline to overrun into the next
+  // field.
   const liveInputs=Array.from(app.querySelectorAll('input')).filter(el=>el.offsetParent!==null);
   const swaps=liveInputs.map(el=>{
     const span=document.createElement('span');
     span.className='pdf-input-swap';
     span.textContent=el.value||'';
-    span.style.width=getComputedStyle(el).width;
     el.parentNode.insertBefore(span,el);
     el.style.display='none';
     return{el,span};
   });
 
-  // Record the vertical extent (in canvas pixel space, matching the scale
-  // used below) of blocks that must never be sliced across a page break —
-  // sketch cards, the header, the materials table, etc. Without this, the
-  // page-splitting loop below cuts purely by pixel height and can slice a
-  // sketch in half across two pages.
   const scale=2;
-  const appTop=app.getBoundingClientRect().top;
-  const avoidBlocks=Array.from(app.querySelectorAll('.hdr,.card,.meta-card,.ic,table.pt')).map(el=>{
-    const r=el.getBoundingClientRect();
-    return{top:(r.top-appTop)*scale,bottom:(r.bottom-appTop)*scale};
-  });
 
   document.body.classList.add('pdf-capture');
   let canvas;
+  let atomicBlocks;
   try{
+    // Measured only now, with .pdf-capture already applied — that class
+    // hides on-screen-only controls (buttons, hints, etc.) inside each
+    // sketch card and elsewhere, which changes their real height. Measuring
+    // before applying it (as an earlier version of this code did) captures
+    // the wrong heights and throws page-break placement off, which is what
+    // was causing sketches to still split across pages.
+    const appTop=app.getBoundingClientRect().top;
+
+    // Atomic blocks: each of these must never be sliced across a page break.
+    // Sketch cards (.ic) are the main requirement — their grid, measurement
+    // labels, and quantity/notes fields all live inside one .ic element, so
+    // treating that whole element as indivisible keeps them together
+    // automatically. The header/order-details card/materials card+table get
+    // the same protection, which also means the "Other materials" section
+    // naturally stays right after the last sketch whenever it fits — it's
+    // only pushed to a new page when the same never-split rule requires it.
+    atomicBlocks=Array.from(app.querySelectorAll('.hdr,.card,.meta-card,.ic,table.pt'))
+      .map(el=>{
+        const r=el.getBoundingClientRect();
+        return{top:(r.top-appTop)*scale,bottom:(r.bottom-appTop)*scale};
+      })
+      .sort((a,b)=>a.top-b.top);
+
     canvas=await html2canvas(app,{scale,backgroundColor:'#ffffff',useCORS:true});
   }finally{
     document.body.classList.remove('pdf-capture');
@@ -916,17 +935,20 @@ async function buildOrderPDF(){
     doc.addImage(imgData,'JPEG',0,0,imgW,imgH);
   }else{
     // Slice the tall canvas across multiple A4 pages. Each page's natural
-    // break point is pulled back to just above a sketch card (or other
-    // "don't split" block) if it would otherwise land in the middle of one,
-    // so that block starts fresh on the next page instead of being cut in
-    // half. Sketches themselves are never resized — only where the page
-    // break falls is adjusted.
+    // break point (renderedPx + one page's worth of pixels) is pulled back
+    // to the top of an atomic block if it would otherwise land inside that
+    // block — so the block starts fresh on the next page instead of being
+    // cut in half. A block taller than a full page is left to split (it
+    // can't be kept whole without shrinking it, which isn't allowed).
     const pxPerPage=canvas.width*(pageH/imgW);
     let renderedPx=0,page=0;
     while(renderedPx<canvas.height){
       let breakAt=Math.min(renderedPx+pxPerPage,canvas.height);
-      for(const b of avoidBlocks){
-        if(b.top<breakAt && b.bottom>breakAt && b.top>renderedPx && b.bottom-b.top<pxPerPage){
+      for(const b of atomicBlocks){
+        const fitsOnAPage=(b.bottom-b.top)<pxPerPage;
+        const startsOnThisPage=b.top>renderedPx;
+        const breakFallsInsideIt=b.top<breakAt && b.bottom>breakAt;
+        if(fitsOnAPage && startsOnThisPage && breakFallsInsideIt){
           breakAt=b.top;
         }
       }
