@@ -1,6 +1,6 @@
 // JSJ Roofing — ServiceM8 add-on backend
 //
-// Architecture (simplified to match a pattern already proven to work):
+// Architecture:
 //   1. /oauth/start + /oauth/callback — one-time connection between this
 //      server and your ServiceM8 account (OAuth). Stores the resulting
 //      tokens so this server can call the ServiceM8 API on your behalf.
@@ -10,8 +10,14 @@
 //      format needed — it's just a link).
 //   3. POST /submit-order — called directly by the order tool's own
 //      JavaScript (a normal fetch, not routed through ServiceM8) once
-//      someone fills in a Job # and clicks "Post to ServiceM8 job diary".
-//      Looks the job up by its job number and posts a Note onto it.
+//      someone fills in a Job # and clicks "Send order". Looks the job up
+//      by its job number, then does two things:
+//        a) posts a minimal text Note onto the job's diary
+//        b) attaches the order PDF to that job (visible in Diary + Files)
+//      (b) fails independently without failing (a) — the response reports
+//      the outcome separately so the front end can show exactly what
+//      did/didn't happen. Emailing the supplier is handled entirely by the
+//      front end as a mailto: draft — this server does not send email.
 
 const express = require('express');
 const fs = require('fs');
@@ -20,7 +26,7 @@ const path = require('path');
 const {
   SM8_APP_ID,
   SM8_APP_SECRET,
-  SM8_OAUTH_SCOPE = 'read_jobs read_customers publish_job_notes',
+  SM8_OAUTH_SCOPE = 'read_jobs read_customers publish_job_notes manage_attachments',
   PUBLIC_BASE_URL,
   TOKENS_FILE = '/data/tokens.json',
   PORT = 3000,
@@ -31,7 +37,7 @@ if (!SM8_APP_ID || !SM8_APP_SECRET || !PUBLIC_BASE_URL) {
 }
 
 const app = express();
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '15mb' })); // PDFs as base64 need more than the 100kb default
 
 // ── token storage ──
 // Single-tenant (just your ServiceM8 account), so a simple JSON file is
@@ -71,6 +77,7 @@ async function getAccessToken() {
   });
 }
 
+// JSON calls (job lookup, note creation, attachment record creation)
 async function sm8(pathname, opts = {}) {
   const token = await getAccessToken();
   const r = await fetch(`https://api.servicem8.com/api_1.0/${pathname}`, {
@@ -80,6 +87,24 @@ async function sm8(pathname, opts = {}) {
       Authorization: `Bearer ${token}`,
       ...(opts.headers || {}),
     },
+  });
+  const text = await r.text();
+  let body;
+  try { body = text ? JSON.parse(text) : null; } catch (e) { body = text; }
+  return { status: r.status, headers: r.headers, body };
+}
+
+// Binary file upload (step 3 of ServiceM8's attachment flow) — needs a
+// multipart/form-data body, so this is separate from sm8() above, which
+// always sends JSON.
+async function sm8UploadFile(pathname, buffer, filename, mimeType) {
+  const token = await getAccessToken();
+  const form = new FormData();
+  form.append('file', new Blob([buffer], { type: mimeType }), filename);
+  const r = await fetch(`https://api.servicem8.com/api_1.0/${pathname}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` }, // no Content-Type — fetch sets the multipart boundary itself
+    body: form,
   });
   const text = await r.text();
   let body;
@@ -120,7 +145,6 @@ app.get('/oauth/callback', async (req, res) => {
 
 // ── Step 3: the order tool itself, opened via the Job Card button ──
 app.get('/order-tool', (req, res) => {
-  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
   let html = fs.readFileSync(path.join(__dirname, 'public', 'order-tool.html'), 'utf8');
 
   // Swap the offline base64-embedded logo for the lightweight hosted copy.
@@ -129,15 +153,17 @@ app.get('/order-tool', (req, res) => {
     '<img class="hdr-logo" src="https://raw.githubusercontent.com/JSJ-Roofing/jsj-order-tool/main/jsj-addon-icon.png"'
   );
 
-  // Tell the page which backend to call for "Post to ServiceM8 job diary".
+  // Tell the page which backend to call for "Send order".
   const inject = `<script>window.__SM8_BACKEND__ = ${JSON.stringify(PUBLIC_BASE_URL)};</script>`;
   html = html.includes('<head>') ? html.replace('<head>', `<head>\n${inject}`) : inject + html;
 
   res.set('Content-Type', 'text/html').send(html);
 });
 
-// ── Step 4a: called first — posts the text note, returns the job's UUID
-//    so the follow-up attachment upload knows where to attach the PDF. ──
+// ── Step 4: called directly by the order tool's own JS when someone clicks
+//    "Send order". Looks the job up by its job number, posts a minimal Note,
+//    and attaches the PDF to the job. Emailing the supplier is handled by
+//    the front end (a mailto: draft) and is not part of this request. ──
 function cors(req, res, next) {
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Headers', 'Content-Type');
@@ -148,15 +174,17 @@ function cors(req, res, next) {
 app.options('/submit-order', cors);
 app.post('/submit-order', cors, async (req, res) => {
   try {
-    const { jobNumber, note } = req.body || {};
+    const { jobNumber, note, pdfBase64, pdfFilename } = req.body || {};
     if (!jobNumber || !note) return res.status(400).json({ error: 'Missing jobNumber or note' });
 
+    // 1. Look up the job
     const lookup = await sm8(`job.json?$filter=generated_job_id eq '${encodeURIComponent(jobNumber)}'`);
     if (!Array.isArray(lookup.body) || lookup.body.length === 0) {
       return res.status(404).json({ error: `No ServiceM8 job found matching "${jobNumber}"` });
     }
     const jobUUID = lookup.body[0].uuid;
 
+    // 2. Post the text note (this is the core action — if it fails, the whole request fails)
     const noteRes = await sm8('note.json', {
       method: 'POST',
       body: JSON.stringify({ related_object: 'job', related_object_uuid: jobUUID, note }),
@@ -165,63 +193,78 @@ app.post('/submit-order', cors, async (req, res) => {
       return res.status(500).json({ error: 'Note creation failed', details: noteRes.body });
     }
 
-    res.json({ success: true, jobUUID });
+    const result = { success: true, diaryNote: true, diaryAttachment: false };
+    const pdfBuffer = pdfBase64 ? Buffer.from(pdfBase64, 'base64') : null;
+
+    // 3. Attach the PDF to the job (shows in Diary + Files) — failure here doesn't fail the request
+    if (pdfBuffer && pdfFilename) {
+      const debug = { jobUUID, pdfBytes: pdfBuffer.length };
+      try {
+        // ServiceM8 wants a timestamp on the attachment record — some accounts
+        // reject/ignore the upload step without one.
+        const nowStamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
+
+        const attachRes = await sm8('Attachment.json', {
+          method: 'POST',
+          body: JSON.stringify({
+            related_object: 'job',
+            related_object_uuid: jobUUID,
+            attachment_name: pdfFilename,
+            file_type: '.pdf',
+            active: true,
+            timestamp: nowStamp,
+          }),
+        });
+        debug.createStatus = attachRes.status;
+        debug.createBody = attachRes.body;
+        console.log('[attach] create response', attachRes.status, JSON.stringify(attachRes.body));
+
+        const attachmentUUID = attachRes.headers && attachRes.headers.get('x-record-uuid');
+        debug.attachmentUUID = attachmentUUID || null;
+        if (!attachmentUUID) throw new Error('No attachment UUID returned: ' + JSON.stringify(attachRes.body));
+
+        const uploadRes = await sm8UploadFile(`Attachment/${attachmentUUID}.file`, pdfBuffer, pdfFilename, 'application/pdf');
+        debug.uploadStatus = uploadRes.status;
+        debug.uploadBody = uploadRes.body;
+        console.log('[attach] upload response', uploadRes.status, JSON.stringify(uploadRes.body));
+        if (uploadRes.status < 200 || uploadRes.status >= 300) {
+          throw new Error('File upload failed: ' + JSON.stringify(uploadRes.body));
+        }
+
+        // Known ServiceM8 behaviour: uploading the file flips the attachment's
+        // `active` flag back to 0 server-side, even though the upload call
+        // itself reports success — which hides it from the Diary/Files tab.
+        // Explicitly re-activate the record after the upload to make it visible.
+        const reactivateRes = await sm8(`Attachment/${attachmentUUID}.json`, {
+          method: 'POST',
+          body: JSON.stringify({ active: true }),
+        });
+        debug.reactivateStatus = reactivateRes.status;
+        debug.reactivateBody = reactivateRes.body;
+        console.log('[attach] reactivate response', reactivateRes.status, JSON.stringify(reactivateRes.body));
+        if (reactivateRes.status < 200 || reactivateRes.status >= 300) {
+          throw new Error('Attachment uploaded but re-activation failed: ' + JSON.stringify(reactivateRes.body));
+        }
+
+        // Read the record back to confirm what ServiceM8 actually has stored —
+        // this is the real proof of whether it will show up in the UI.
+        const verifyRes = await sm8(`Attachment/${attachmentUUID}.json`);
+        debug.verifyStatus = verifyRes.status;
+        debug.verifyBody = verifyRes.body;
+        console.log('[attach] verify response', verifyRes.status, JSON.stringify(verifyRes.body));
+
+        result.diaryAttachment = true;
+      } catch (e) {
+        result.diaryAttachmentError = e.message;
+      }
+      result.diaryAttachmentDebug = debug;
+    }
+
+    res.json(result);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
-
-// ── Step 4b: called second — uploads the PDF as raw binary (much smaller
-//    than base64-in-JSON) and attaches it to the same job. ──
-app.options('/submit-order/attachment', cors);
-app.post(
-  '/submit-order/attachment',
-  cors,
-  express.raw({ type: 'application/pdf', limit: '15mb' }),
-  async (req, res) => {
-    try {
-      const { jobUUID, filename } = req.query;
-      if (!jobUUID || !Buffer.isBuffer(req.body) || !req.body.length) {
-        return res.status(400).json({ error: 'Missing jobUUID or PDF body' });
-      }
-      const token = await getAccessToken();
-      const name = filename || 'order.pdf';
-
-      // Step 1: create the attachment record, get its UUID back
-      const createRes = await fetch('https://api.servicem8.com/api_1.0/attachment.json', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          related_object: 'job',
-          related_object_uuid: jobUUID,
-          attachment_name: name,
-          file_type: '.pdf',
-          active: 1,
-        }),
-      });
-      const attachmentUUID = createRes.headers.get('x-record-uuid');
-      if (!createRes.ok || !attachmentUUID) {
-        const details = await createRes.text();
-        return res.status(500).json({ error: 'attachment record creation failed: ' + details });
-      }
-
-      // Step 2: upload the actual file bytes to that record
-      const uploadRes = await fetch(`https://api.servicem8.com/api_1.0/Attachment/${attachmentUUID}.file`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/pdf', Authorization: `Bearer ${token}` },
-        body: req.body,
-      });
-      if (!uploadRes.ok) {
-        const details = await uploadRes.text();
-        return res.status(500).json({ error: 'file upload failed: ' + details });
-      }
-
-      res.json({ success: true });
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
-  }
-);
 
 app.get('/', (req, res) => res.send('JSJ ServiceM8 order add-on is running.'));
 
