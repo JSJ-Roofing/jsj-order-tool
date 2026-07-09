@@ -76,7 +76,7 @@ body{background:var(--surface);color:var(--text);font-family:'Inter',system-ui,s
 .selc:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px rgba(6,84,166,.12);}
 .sup-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--bl);}
 .sup-row:last-child{border-bottom:none;}
-.tg{display:flex;gap:8px;}
+.tg{display:flex;gap:8px;flex-wrap:wrap;}
 .tog{
   flex:1;min-height:44px;border:1.5px solid var(--bl);background:#fff;border-radius:var(--r6);
   padding:10px 14px;font-size:.875rem;font-family:inherit;font-weight:600;
@@ -137,6 +137,7 @@ body{background:var(--surface);color:var(--text);font-family:'Inter',system-ui,s
 .mb.d{border-color:var(--err);color:var(--err);}
 .mb.d:hover{background:var(--err);color:#fff;}
 .mb.arrow-b:hover{background:#e2711d !important;color:#fff !important;}
+.mb:disabled{opacity:.4;cursor:not-allowed;pointer-events:none;}
 
 .ab{
   display:inline-flex;align-items:center;gap:8px;justify-content:center;
@@ -240,6 +241,8 @@ body.pdf-capture .pdf-input-swap{
   <div class="card meta-card">
     <div class="mg">
       <div class="f"><label>Ordered by</label><input id="orderedBy" placeholder="Your name"></div>
+      <div class="f"><label>Ordered by — mobile</label><input id="orderedByPhone" type="tel" inputmode="tel" placeholder="e.g. 0412 345 678"></div>
+      <div class="f full" style="margin-top:-8px;"><span class="hint">For fast responses on order queries, call the ordering tradesman above.</span></div>
       <div class="f"><label>Reference</label><input id="reference" placeholder="e.g. Dean Private"></div>
       <div class="f"><label>ServiceM8 Job #</label><input id="sm8JobNumber" placeholder="e.g. 1136" inputmode="numeric"></div>
       <div class="f"><label>Order date</label><input id="orderDate" type="date"></div>
@@ -262,6 +265,7 @@ body.pdf-capture .pdf-input-swap{
         <div class="tg np">
           <button type="button" class="tog on" data-v="store">Store</button>
           <button type="button" class="tog" data-v="site">Job site</button>
+          <button type="button" class="tog" data-v="pickup">Pick up</button>
         </div>
         <span class="po" id="dtp"></span>
         <input id="deliverAddr" placeholder="Job site address" style="display:none;margin-top:8px;">
@@ -294,9 +298,11 @@ body.pdf-capture .pdf-input-swap{
   </div>
   <p class="enote np" id="enoteText">
     "Send order" builds a PDF of this order and attaches it to the ServiceM8 job diary (needs the
-    Job # filled in above), then opens a pre-filled email draft to the supplier for you to send —
-    the PDF is not attached to that draft, since a webpage can't do that automatically. "Download PDF"
-    just saves a copy to this device without sending anything.
+    Job # filled in above). On desktop it also opens a pre-filled email draft to the supplier —
+    the PDF isn't attached to that draft automatically, so drag your downloaded copy into it. On
+    mobile no email draft is opened; open the job in ServiceM8 and send the attached PDF to the
+    supplier from there instead. "Download PDF" just saves a copy to this device without sending
+    anything.
   </p>
 
   <datalist id="cols">
@@ -331,7 +337,7 @@ const addrIn=document.getElementById('deliverAddr');
 const dtpEl=document.getElementById('dtp');
 function syncD(){
   const v=document.querySelector('.tog.on').dataset.v;
-  dtpEl.textContent=v==='store'?'Store':'Job site — '+(addrIn.value||'(address not set)');
+  dtpEl.textContent=v==='store'?'Store':v==='pickup'?'Pick up (from supplier)':'Job site — '+(addrIn.value||'(address not set)');
 }
 toggs.forEach(b=>b.addEventListener('click',()=>{
   toggs.forEach(x=>x.classList.remove('on'));
@@ -437,6 +443,12 @@ function makeSketch(wrap){
   wrap.appendChild(svg);
 
   const pts=[];
+  // Drawing / measuring is split into two phases so touch mis-taps while
+  // placing points can't be picked up as label/angle interactions, and vice
+  // versa: while drawing (locked=false), taps only place new points; once
+  // "Complete flashing" locks the shape, taps only cycle angle labels and
+  // no new points/lines can be added (see the wrap click handler below).
+  let locked=false;
   // segLabels[i] covers segment from pts[i] to pts[i+1]
   // {fo, inp, reposition()} — see createLabel()
   const segLabels=[];
@@ -754,20 +766,38 @@ function makeSketch(wrap){
         [-1,0,1].forEach(d=>{const v=i+d;if(v>=0&&v<pts.length)moveAngLabel(v);});
       }
     });
-    c.addEventListener('pointerup',()=>{if(!drag)cycleAngle(i);s=null;drag=false;});
+    c.addEventListener('pointerup',()=>{if(!drag&&locked)cycleAngle(i);s=null;drag=false;});
   }
 
   // ── add point ──
+  // Only active while the shape is unlocked (still being drawn). Segment
+  // labels aren't created here anymore — they're generated in bulk by
+  // completeDrawing() below once the outline is finished, so no editable
+  // inputs exist yet to catch stray taps while the shape is still taking
+  // form.
   wrap.addEventListener('click',e=>{
+    if(locked)return;
     if(e.target.closest('foreignObject')||e.target.tagName==='circle'||e.target.closest('g.arrow-el'))return;
     const r=wrap.getBoundingClientRect();
-    const ni=pts.length;
     pts.push({x:e.clientX-r.left,y:e.clientY-r.top});
-    if(ni>0) addSegLabel(ni-1);
     render();
   });
 
   return{
+    isLocked(){return locked;},
+    toggleLock(){
+      if(locked){
+        locked=false;
+      }else{
+        // Finalise: create a measurement label for every segment that
+        // doesn't already have one (covers both a first-time completion and
+        // re-completing after "Edit shape" added more points).
+        for(let i=0;i<pts.length-1;i++){
+          if(!segLabels[i]) addSegLabel(i);
+        }
+        locked=true;
+      }
+    },
     undo(){
       if(!pts.length)return;
       const li=pts.length-1;
@@ -809,10 +839,11 @@ function buildItem(n){
       <div class="sc"></div>
     </div>
     <div class="sctrl np">
+      <button type="button" class="mb done-b" style="border-color:#0654a6;color:#0654a6;">Complete flashing ✓</button>
       <button type="button" class="mb undo-b">Undo point</button>
       <button type="button" class="mb d clear-b">Clear sketch</button>
       <button type="button" class="mb arrow-b" style="border-color:#e2711d;color:#e2711d;">+ Colour-side arrow</button>
-      <span class="hint">Click to place points · click a point to cycle angle (none / internal° / external°) · drag a point to move it · drag a label's ⠿ handle to reposition it, or its corner handle to resize it · drag an arrow's tip to aim it, its centre dot to move it, or its ✕ to remove it</span>
+      <span class="hint sk-hint">Tap to place points for the flashing profile · drag a point to move it · tap "Complete flashing" once the outline is right, then add measurements and angles</span>
     </div>
     <div class="iflds">
       <div class="f"><label>Colour</label><input class="fc" list="cols" placeholder="e.g. Basalt"></div>
@@ -823,10 +854,25 @@ function buildItem(n){
   `;
   itemsEl.appendChild(card);
   const sk=makeSketch(card.querySelector('.sc'));
-  card.querySelector('.undo-b').onclick=()=>sk.undo();
-  card.querySelector('.clear-b').onclick=()=>sk.clear();
+  const doneBtn=card.querySelector('.done-b');
+  const undoBtn=card.querySelector('.undo-b');
+  const clearBtn2=card.querySelector('.clear-b');
+  const hintEl=card.querySelector('.sk-hint');
+  const DRAW_HINT='Tap to place points for the flashing profile · drag a point to move it · tap "Complete flashing" once the outline is right, then add measurements and angles';
+  const MEASURE_HINT='Tap a point to cycle its angle label (none / internal° / external°) · drag a label\'s ⠿ handle to reposition it, or its corner handle to resize it · drag an arrow\'s tip to aim it, its centre dot to move it, or its ✕ to remove it · tap "Edit shape" to change the outline';
+  function refreshLockUI(){
+    const locked=sk.isLocked();
+    doneBtn.textContent=locked?'Edit shape ✎':'Complete flashing ✓';
+    undoBtn.disabled=locked;
+    clearBtn2.disabled=locked;
+    hintEl.textContent=locked?MEASURE_HINT:DRAW_HINT;
+  }
+  doneBtn.onclick=()=>{sk.toggleLock();refreshLockUI();};
+  undoBtn.onclick=()=>sk.undo();
+  clearBtn2.onclick=()=>sk.clear();
   card.querySelector('.arrow-b').onclick=()=>sk.addArrow();
   card.querySelector('.ri').onclick=()=>{card.remove();renum();};
+  refreshLockUI();
   return card;
 }
 function renum(){document.querySelectorAll('.ic').forEach((c,i)=>c.querySelector('.inum').textContent=i+1);}
@@ -852,7 +898,7 @@ addRow();
 // clear
 document.getElementById('clearBtn').onclick=()=>{
   if(!confirm('Clear the whole order?'))return;
-  ['reference','supplierName','supplierEmail','orderedBy','deliverAddr','deliveryDate'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  ['reference','supplierName','supplierEmail','orderedBy','orderedByPhone','deliverAddr','deliveryDate'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   itemsEl.innerHTML='';ic=0;buildItem(1);
   pb.innerHTML='';addRow();
 };
@@ -1040,6 +1086,14 @@ function buildDiaryNoteText(){
 // ─────────────────────────────────────────────
 const SM8_BACKEND=window.__SM8_BACKEND__||'https://jsj-order-tool-production.up.railway.app';
 
+// Rough device check used only to decide whether to pop the mailto: draft
+// after sending (see below) — doesn't need to be bulletproof, just needs to
+// catch phones/tablets vs desktop browsers.
+function isMobileDevice(){
+  return /Android|iPhone|iPad|iPod|Mobi/i.test(navigator.userAgent)
+    || (window.matchMedia && window.matchMedia('(pointer:coarse)').matches);
+}
+
 document.getElementById('sendBtn').onclick=async()=>{
   const btn=document.getElementById('sendBtn');
   const jobNumber=document.getElementById('sm8JobNumber').value.trim();
@@ -1093,13 +1147,20 @@ document.getElementById('sendBtn').onclick=async()=>{
       btn.textContent='Posted, with issues ⚠';
       alert('Order posted to the job diary, but this part failed:\n\n'+problems.join('\n')+'\n\nDebug info:\n'+JSON.stringify(data.diaryAttachmentDebug,null,2)+'\n\nAsk whoever manages the backend to check the logs.');
     }else{
-      btn.textContent='Sent ✓';
+      btn.textContent=isMobileDevice()?'Saved to job diary ✓':'Sent ✓';
     }
 
-    // Open a simple pre-filled email draft — no attachment (not technically
-    // possible from a webpage) and no PDF download to this device.
-    const emailBody='Hi,\n\nPlease see the attached order form.\n\nKind regards,\nJSJ Roofing';
-    window.location.href=`mailto:${encodeURIComponent(sEmail)}?subject=${encodeURIComponent(`Material Order — ${ref} — ${oDate}`)}&body=${encodeURIComponent(emailBody)}`;
+    // Open a simple pre-filled email draft — but only on desktop. On desktop
+    // the PDF from "Download PDF" can be dragged straight into this draft,
+    // so the popup is a useful shortcut. On mobile there's no way to attach
+    // a file to a mailto: draft anyway, and the PDF is already attached to
+    // the ServiceM8 job diary — so on mobile staff just open ServiceM8 and
+    // send it from there, and popping an empty email draft here would only
+    // be an extra screen to back out of.
+    if(!isMobileDevice()){
+      const emailBody='Hi,\n\nPlease see the attached order form.\n\nKind regards,\nJSJ Roofing';
+      window.location.href=`mailto:${encodeURIComponent(sEmail)}?subject=${encodeURIComponent(`Material Order — ${ref} — ${oDate}`)}&body=${encodeURIComponent(emailBody)}`;
+    }
 
     setTimeout(()=>{btn.disabled=false;btn.textContent=orig;},3000);
   }catch(err){
