@@ -868,24 +868,52 @@ document.getElementById('clearBtn').onclick=()=>{
 // actual .pdf file, no OS print dialog involved.
 // ─────────────────────────────────────────────
 async function buildOrderPDF(){
-  const app=document.querySelector('.app');
+  // Capture happens on an off-screen CLONE rendered at a fixed,
+  // desktop-equivalent width (960px — the same as .app's max-width),
+  // regardless of the real device viewport.
+  //
+  // Why: the "Order details" field grid (.mg) uses
+  // grid-template-columns:repeat(auto-fit,minmax(200px,1fr)). On a phone
+  // screen there isn't room for more than one 200px column, so it collapses
+  // to a single column and the card becomes 2-3x taller than it is on
+  // desktop (where 3-4 fields sit side by side). That taller card can end up
+  // taller than a single printable page — and the "never split this card"
+  // rule further down explicitly gives up and lets a block split if it's
+  // taller than a full page, since it can't be kept whole without shrinking
+  // it. That's what was cutting the order-details card in half across a
+  // page break on mobile-generated PDFs while desktop (already wide enough
+  // for multiple columns) never hit that case.
+  //
+  // Rendering a fixed-width clone off-screen keeps the multi-column layout
+  // — and therefore the pagination — identical no matter what device the
+  // order was filled in on. It also means the live page's inputs never need
+  // to be swapped/hidden mid-edit, since all of that now happens on the
+  // disconnected clone instead of the visible DOM.
+  const liveApp=document.querySelector('.app');
+  const holder=document.createElement('div');
+  holder.style.cssText='position:fixed;top:0;left:-99999px;width:960px;pointer-events:none;';
+  const app=liveApp.cloneNode(true);
+  // Strip ids from the clone so it never shadows the live element for any
+  // getElementById() call that might fire elsewhere while this is in flight.
+  app.querySelectorAll('[id]').forEach(el=>el.removeAttribute('id'));
+  holder.appendChild(app);
+  document.body.appendChild(holder);
 
   // html2canvas can't reliably rasterise live <input> values, so swap every
-  // visible input for a plain text span carrying the same value, capture,
-  // then swap back. Width is intentionally left to the .pdf-input-swap CSS
-  // rule (width:100% of its own field) rather than being captured here —
+  // visible input (on the clone) for a plain text span carrying the same
+  // value. Width is intentionally left to the .pdf-input-swap CSS rule
+  // (width:100% of its own field) rather than being captured here —
   // capturing a fixed pixel width from the on-screen layout, before the
   // pdf-capture class reflows the grid, previously caused each span to be
   // sized for the wrong layout and its underline to overrun into the next
   // field.
   const liveInputs=Array.from(app.querySelectorAll('input')).filter(el=>el.offsetParent!==null);
-  const swaps=liveInputs.map(el=>{
+  liveInputs.forEach(el=>{
     const span=document.createElement('span');
     span.className='pdf-input-swap';
     span.textContent=el.value||'';
     el.parentNode.insertBefore(span,el);
     el.style.display='none';
-    return{el,span};
   });
 
   const scale=2;
@@ -920,7 +948,7 @@ async function buildOrderPDF(){
     canvas=await html2canvas(app,{scale,backgroundColor:'#ffffff',useCORS:true});
   }finally{
     document.body.classList.remove('pdf-capture');
-    swaps.forEach(({el,span})=>{el.style.display='';span.remove();});
+    holder.remove();
   }
 
   const{jsPDF}=window.jspdf;
