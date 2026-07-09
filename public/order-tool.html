@@ -268,6 +268,19 @@ body.pdf-capture .pdf-input-swap{
           <button type="button" class="tog" data-v="pickup">Pick up</button>
         </div>
         <span class="po" id="dtp"></span>
+
+        <div id="storeAddrBlock" style="margin-top:8px;">
+          <div class="srow np">
+            <select id="storePick" class="selc">
+              <option value="">— Select store/factory —</option>
+            </select>
+            <button type="button" class="mb" id="saveStoreBtn">+ Save current</button>
+            <button type="button" class="mb" id="manageStoreBtn">Manage saved</button>
+          </div>
+          <input id="storeAddr" placeholder="Store / factory address" style="margin-top:8px;">
+          <div id="storeManage" class="card np" style="display:none;margin-top:10px;padding:12px;"></div>
+        </div>
+
         <input id="deliverAddr" placeholder="Job site address" style="display:none;margin-top:8px;">
       </div>
     </div>
@@ -334,15 +347,20 @@ document.getElementById('orderDate').value=new Date().toISOString().slice(0,10);
 // deliver toggle
 const toggs=document.querySelectorAll('.tog');
 const addrIn=document.getElementById('deliverAddr');
+const storeBlockEl=document.getElementById('storeAddrBlock');
+const storeAddrEl=document.getElementById('storeAddr');
 const dtpEl=document.getElementById('dtp');
 function syncD(){
+  // Just the category here — the actual address (store or job site) is
+  // shown by its own visible field below, so this doesn't repeat it.
   const v=document.querySelector('.tog.on').dataset.v;
-  dtpEl.textContent=v==='store'?'Store':v==='pickup'?'Pick up (from supplier)':'Job site — '+(addrIn.value||'(address not set)');
+  dtpEl.textContent=v==='store'?'Store':v==='pickup'?'Pick up (from supplier)':'Job site';
 }
 toggs.forEach(b=>b.addEventListener('click',()=>{
   toggs.forEach(x=>x.classList.remove('on'));
   b.classList.add('on');
   addrIn.style.display=b.dataset.v==='site'?'block':'none';
+  storeBlockEl.style.display=b.dataset.v==='store'?'block':'none';
   syncD();
 }));
 addrIn.addEventListener('input',syncD);
@@ -426,6 +444,81 @@ document.getElementById('manageSupplierBtn').onclick=()=>{
 };
 
 // ─────────────────────────────────────────────
+// STORE / FACTORY ADDRESS PRESETS
+// Same idea as supplier presets: saved locally on this device so staff can
+// pick between current sites (e.g. two factories right now) from a
+// dropdown instead of retyping the address, and old ones can be removed
+// once the business consolidates into a single address.
+// ─────────────────────────────────────────────
+const STORE_KEY='jsj_store_addresses_v1';
+function loadStores(){
+  try{ const v=JSON.parse(localStorage.getItem(STORE_KEY)); return Array.isArray(v)?v:[]; }
+  catch(e){ return []; }
+}
+function persistStores(){
+  try{ localStorage.setItem(STORE_KEY,JSON.stringify(stores)); }
+  catch(e){ /* storage unavailable — presets just won't persist */ }
+}
+let stores=loadStores();
+const storePick=document.getElementById('storePick');
+const storeManageEl=document.getElementById('storeManage');
+
+function renderStorePick(){
+  const cur=storePick.value;
+  storePick.innerHTML='<option value="">— Select store/factory —</option>'+
+    stores.map((s,i)=>`<option value="${i}">${escHtml(s.name)}</option>`).join('');
+  if(cur!=='' && +cur<stores.length) storePick.value=cur;
+}
+renderStorePick();
+
+storePick.addEventListener('change',()=>{
+  if(storePick.value==='')return;
+  const s=stores[+storePick.value];
+  if(s){ storeAddrEl.value=s.address||''; syncD(); }
+});
+
+document.getElementById('saveStoreBtn').onclick=()=>{
+  const addr=storeAddrEl.value.trim();
+  if(!addr){ alert('Enter the store/factory address first, then click "+ Save current".'); return; }
+  const name=(prompt('Short label for this address (e.g. "Riverstone factory"):','')||'').trim();
+  if(!name)return;
+  const i=stores.findIndex(s=>s.name.toLowerCase()===name.toLowerCase());
+  if(i>-1) stores[i]={name,address:addr}; else stores.push({name,address:addr});
+  persistStores();
+  renderStorePick();
+  const idx=stores.findIndex(s=>s.name.toLowerCase()===name.toLowerCase());
+  if(idx>-1) storePick.value=idx;
+  if(storeManageEl.style.display!=='none') renderStoreManage();
+};
+
+function renderStoreManage(){
+  if(!stores.length){
+    storeManageEl.innerHTML='<p class="hint" style="margin:0;">No saved addresses yet — enter one above and click "+ Save current".</p>';
+    return;
+  }
+  storeManageEl.innerHTML=stores.map((s,i)=>`
+    <div class="sup-row">
+      <div style="font-size:.875rem;"><strong>${escHtml(s.name)}</strong><br><span style="color:var(--text-s);">${escHtml(s.address)}</span></div>
+      <button type="button" class="rr" data-i="${i}" title="Remove">✕</button>
+    </div>`).join('');
+  storeManageEl.querySelectorAll('.rr').forEach(b=>{
+    b.onclick=()=>{
+      const i=+b.dataset.i;
+      if(!confirm('Remove saved address "'+stores[i].name+'"?'))return;
+      stores.splice(i,1);
+      persistStores();
+      renderStorePick();
+      renderStoreManage();
+    };
+  });
+}
+document.getElementById('manageStoreBtn').onclick=()=>{
+  const isOpen=storeManageEl.style.display!=='none';
+  if(isOpen){ storeManageEl.style.display='none'; }
+  else{ renderStoreManage(); storeManageEl.style.display='block'; }
+};
+
+// ─────────────────────────────────────────────
 // SKETCH ENGINE v4
 // • Each line segment gets a measurement label
 //   rendered as a <foreignObject> inside the SVG,
@@ -485,16 +578,30 @@ function makeSketch(wrap){
     inp.placeholder=opts.placeholder;
     inp.title=opts.title;
     if(opts.numeric){inp.setAttribute('inputmode','decimal');}
+    // Persistent unit suffix (e.g. "°" for angles) — shown as its own element
+    // rather than baked into the placeholder, so it stays visible once the
+    // tradesman types a value instead of disappearing (a bare "45" reads as
+    // ambiguous to a supplier; "45°" doesn't).
+    let suffixEl=null;
+    if(opts.suffix){
+      suffixEl=document.createElement('span');
+      suffixEl.textContent=opts.suffix;
+      suffixEl.style.cssText=`position:absolute;top:0;right:3px;height:100%;display:flex;align-items:center;pointer-events:none;font-family:Inter,sans-serif;font-weight:600;color:${opts.color};`;
+    }
     const grip=document.createElement('div');
     grip.className='lbl-grip np';
     grip.title='Drag to move';
     const rez=document.createElement('div');
     rez.className='lbl-resize np';
     rez.title='Drag to resize';
-    wrap.appendChild(inp);wrap.appendChild(grip);wrap.appendChild(rez);
+    wrap.appendChild(inp);
+    if(suffixEl) wrap.appendChild(suffixEl);
+    wrap.appendChild(grip);wrap.appendChild(rez);
     function styleInput(){
       const fs=clamp(Math.round(st.h*0.5),8,18);
-      inp.style.cssText=`width:100%;height:100%;box-sizing:border-box;font-size:${fs}px;font-family:Inter,sans-serif;font-variant-numeric:tabular-nums;text-align:center;border:1.5px solid ${opts.color};border-radius:3px;background:rgba(255,255,255,0.95);padding:0 2px;display:block;`;
+      const padRight=opts.suffix?Math.max(14,Math.round(fs*0.95)):2;
+      inp.style.cssText=`width:100%;height:100%;box-sizing:border-box;font-size:${fs}px;font-family:Inter,sans-serif;font-variant-numeric:tabular-nums;text-align:${opts.suffix?'right':'center'};border:1.5px solid ${opts.color};border-radius:3px;background:rgba(255,255,255,0.95);padding:0 ${padRight}px 0 2px;display:block;`;
+      if(suffixEl) suffixEl.style.fontSize=Math.round(fs*0.85)+'px';
     }
     styleInput();
     const fo=svgEl('foreignObject',{x:0,y:0,width:st.w,height:st.h,overflow:'visible'});
@@ -598,8 +705,8 @@ function makeSketch(wrap){
     if(!pos) return;
     const lbl=createLabel({
       getBasePos:()=>angLabelXY(v,angLabels[v]?angLabels[v].mode:mode),
-      placeholder:'°',title:(mode==='int'?'Internal angle':'External angle')+' (drag ⠿ to move, corner to resize)',
-      color:'#082b51',defW:36,defH:18,minW:24,maxW:120,minH:14,maxH:40,numeric:true
+      placeholder:'',title:(mode==='int'?'Internal angle':'External angle')+' (drag ⠿ to move, corner to resize)',
+      color:'#082b51',defW:36,defH:18,minW:24,maxW:120,minH:14,maxH:40,numeric:true,suffix:'°'
     });
     svg.appendChild(lbl.fo);
     lbl.reposition();
@@ -898,7 +1005,7 @@ addRow();
 // clear
 document.getElementById('clearBtn').onclick=()=>{
   if(!confirm('Clear the whole order?'))return;
-  ['reference','supplierName','supplierEmail','orderedBy','orderedByPhone','deliverAddr','deliveryDate'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  ['reference','supplierName','supplierEmail','orderedBy','orderedByPhone','deliverAddr','storeAddr','deliveryDate'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   itemsEl.innerHTML='';ic=0;buildItem(1);
   pb.innerHTML='';addRow();
 };
