@@ -92,6 +92,9 @@ body{background:var(--surface);color:var(--text);font-family:'Inter',system-ui,s
   border-radius:0 var(--r8) var(--r8) 0;padding:20px;margin-bottom:16px;box-shadow:var(--sh);
 }
 .ih{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;}
+.ihbtns{display:flex;gap:8px;align-items:center;}
+.cp{background:#fff;border:1.5px solid var(--bl);color:#0654a6;border-radius:var(--r6);height:32px;padding:0 10px;cursor:pointer;font-size:13px;font-weight:600;white-space:nowrap;transition:all .15s;}
+.cp:hover{background:#eaf3fb;border-color:#0654a6;}
 .inum{
   display:inline-flex;align-items:center;justify-content:center;
   width:28px;height:28px;border-radius:9999px;
@@ -254,6 +257,7 @@ body.pdf-capture .pdf-input-swap{
           </select>
           <button type="button" class="mb" id="saveSupplierBtn">+ Save current</button>
           <button type="button" class="mb" id="manageSupplierBtn">Manage saved</button>
+          <span id="supSyncWarn" class="hint np" style="display:none;color:var(--err);"></span>
         </div>
         <div id="supplierManage" class="card np" style="display:none;margin-top:10px;padding:12px;"></div>
       </div>
@@ -276,6 +280,7 @@ body.pdf-capture .pdf-input-swap{
             </select>
             <button type="button" class="mb" id="saveStoreBtn">+ Save current</button>
             <button type="button" class="mb" id="manageStoreBtn">Manage saved</button>
+            <span id="storeSyncWarn" class="hint np" style="display:none;color:var(--err);"></span>
           </div>
           <input id="storeAddr" placeholder="Store / factory address" style="margin-top:8px;">
           <div id="storeManage" class="card np" style="display:none;margin-top:10px;padding:12px;"></div>
@@ -334,6 +339,12 @@ body.pdf-capture .pdf-input-swap{
 <script>
 (function(){
 const NS='http://www.w3.org/2000/svg';
+// window.__SM8_BACKEND__ is injected by the server when this page is served
+// through the add-on; falls back to the same Railway URL so a standalone
+// downloaded copy of this file works identically. Declared up here (rather
+// than down by the send-order code, where it used to live) since the
+// shared-presets sync further down needs it too.
+const SM8_BACKEND=window.__SM8_BACKEND__||'https://jsj-order-tool-production.up.railway.app';
 function svgEl(tag,attrs){
   const e=document.createElementNS(NS,tag);
   Object.entries(attrs||{}).forEach(([k,v])=>e.setAttribute(k,v));
@@ -367,24 +378,79 @@ addrIn.addEventListener('input',syncD);
 syncD();
 
 // ─────────────────────────────────────────────
-// SUPPLIER PRESETS
-// Saved locally on this device (localStorage) so staff can pick a
-// supplier from a dropdown and have their email fill in automatically,
-// instead of re-typing it each time.
+// SHARED PRESETS (suppliers + store/factory addresses)
+// These used to live only in this device's localStorage, which meant every
+// phone/computer that opened the tool had to re-enter and re-save the same
+// suppliers and addresses. They now sync through one small endpoint on the
+// existing ServiceM8 backend (SM8_BACKEND) — GET /presets to read the
+// shared list, PUT /presets to replace it — so any device saving or
+// removing an entry updates it for every other device. localStorage is
+// still used underneath, but purely as an instant-load cache and an
+// offline fallback if the backend can't be reached; it's kept in sync with
+// whatever the server last returned/accepted.
+//
+// NOTE: this needs a matching /presets route added to the backend — it
+// isn't part of this HTML file. Until that route exists, every save/load
+// here will silently fail over to this device's local cache (same as
+// before), and the small warning next to "Manage saved" will say so.
 // ─────────────────────────────────────────────
+const PRESETS_URL=SM8_BACKEND+'/presets';
 const SUPPLIER_KEY='jsj_suppliers_v1';
-function loadSuppliers(){
-  try{ const v=JSON.parse(localStorage.getItem(SUPPLIER_KEY)); return Array.isArray(v)?v:[]; }
-  catch(e){ return []; }
-}
-function persistSuppliers(){
-  try{ localStorage.setItem(SUPPLIER_KEY,JSON.stringify(suppliers)); }
-  catch(e){ /* storage unavailable — presets just won't persist */ }
-}
+const STORE_KEY='jsj_store_addresses_v1';
 function escHtml(s){
   return(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
-let suppliers=loadSuppliers();
+function loadLocalPresets(){
+  let sup=[],st=[];
+  try{ const v=JSON.parse(localStorage.getItem(SUPPLIER_KEY)); if(Array.isArray(v))sup=v; }catch(e){}
+  try{ const v=JSON.parse(localStorage.getItem(STORE_KEY)); if(Array.isArray(v))st=v; }catch(e){}
+  return{sup,st};
+}
+function cachePresetsLocally(){
+  try{ localStorage.setItem(SUPPLIER_KEY,JSON.stringify(suppliers)); }catch(e){}
+  try{ localStorage.setItem(STORE_KEY,JSON.stringify(stores)); }catch(e){}
+}
+{ const cached=loadLocalPresets(); var suppliers=cached.sup, stores=cached.st; }
+
+let presetsSynced=true; // whether the shared backend is actually reachable
+function setSyncWarning(ok){
+  presetsSynced=ok;
+  const msg=ok?'':'⚠ saved on this device only — couldn\'t reach shared storage';
+  ['supSyncWarn','storeSyncWarn'].forEach(id=>{
+    const el=document.getElementById(id);
+    if(!el)return;
+    el.textContent=msg;
+    el.style.display=ok?'none':'inline';
+  });
+}
+async function pushPresets(){
+  cachePresetsLocally();
+  try{
+    const r=await fetch(PRESETS_URL,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({suppliers,stores})});
+    setSyncWarning(r.ok);
+  }catch(e){ setSyncWarning(false); }
+}
+async function pullPresets(){
+  try{
+    const r=await fetch(PRESETS_URL);
+    if(!r.ok) throw new Error('bad status');
+    const data=await r.json();
+    if(Array.isArray(data.suppliers)) suppliers=data.suppliers;
+    if(Array.isArray(data.stores)) stores=data.stores;
+    cachePresetsLocally();
+    setSyncWarning(true);
+  }catch(e){
+    // Backend not reachable, or the /presets route doesn't exist yet —
+    // stick with this device's local cache rather than blocking the form.
+    setSyncWarning(false);
+  }
+  renderSupPick();
+  renderStorePick();
+}
+
+// ─────────────────────────────────────────────
+// SUPPLIER PRESETS
+// ─────────────────────────────────────────────
 const supPick=document.getElementById('supplierPick');
 const supNameEl=document.getElementById('supplierName');
 const supEmailEl=document.getElementById('supplierEmail');
@@ -409,7 +475,7 @@ document.getElementById('saveSupplierBtn').onclick=()=>{
   if(!name){ alert('Enter a supplier name before saving it.'); return; }
   const i=suppliers.findIndex(s=>s.name.toLowerCase()===name.toLowerCase());
   if(i>-1) suppliers[i]={name,email}; else suppliers.push({name,email});
-  persistSuppliers();
+  pushPresets();
   renderSupPick();
   const idx=suppliers.findIndex(s=>s.name.toLowerCase()===name.toLowerCase());
   if(idx>-1) supPick.value=idx;
@@ -431,7 +497,7 @@ function renderSupManage(){
       const i=+b.dataset.i;
       if(!confirm('Remove saved supplier "'+suppliers[i].name+'"?'))return;
       suppliers.splice(i,1);
-      persistSuppliers();
+      pushPresets();
       renderSupPick();
       renderSupManage();
     };
@@ -445,21 +511,12 @@ document.getElementById('manageSupplierBtn').onclick=()=>{
 
 // ─────────────────────────────────────────────
 // STORE / FACTORY ADDRESS PRESETS
-// Same idea as supplier presets: saved locally on this device so staff can
-// pick between current sites (e.g. two factories right now) from a
-// dropdown instead of retyping the address, and old ones can be removed
-// once the business consolidates into a single address.
+// Same idea as supplier presets: pick between current sites (e.g. two
+// factories right now) from a dropdown instead of retyping the address,
+// and old ones can be removed once the business consolidates into a
+// single address — that removal now applies everywhere, not just the
+// device that removed it.
 // ─────────────────────────────────────────────
-const STORE_KEY='jsj_store_addresses_v1';
-function loadStores(){
-  try{ const v=JSON.parse(localStorage.getItem(STORE_KEY)); return Array.isArray(v)?v:[]; }
-  catch(e){ return []; }
-}
-function persistStores(){
-  try{ localStorage.setItem(STORE_KEY,JSON.stringify(stores)); }
-  catch(e){ /* storage unavailable — presets just won't persist */ }
-}
-let stores=loadStores();
 const storePick=document.getElementById('storePick');
 const storeManageEl=document.getElementById('storeManage');
 
@@ -484,7 +541,7 @@ document.getElementById('saveStoreBtn').onclick=()=>{
   if(!name)return;
   const i=stores.findIndex(s=>s.name.toLowerCase()===name.toLowerCase());
   if(i>-1) stores[i]={name,address:addr}; else stores.push({name,address:addr});
-  persistStores();
+  pushPresets();
   renderStorePick();
   const idx=stores.findIndex(s=>s.name.toLowerCase()===name.toLowerCase());
   if(idx>-1) storePick.value=idx;
@@ -506,7 +563,7 @@ function renderStoreManage(){
       const i=+b.dataset.i;
       if(!confirm('Remove saved address "'+stores[i].name+'"?'))return;
       stores.splice(i,1);
-      persistStores();
+      pushPresets();
       renderStorePick();
       renderStoreManage();
     };
@@ -517,6 +574,12 @@ document.getElementById('manageStoreBtn').onclick=()=>{
   if(isOpen){ storeManageEl.style.display='none'; }
   else{ renderStoreManage(); storeManageEl.style.display='block'; }
 };
+
+// Kick off the shared-storage fetch now that both dropdowns exist. The
+// local cache (already loaded above) keeps the form usable instantly in
+// the meantime; this just reconciles it with the shared copy once it
+// arrives.
+pullPresets();
 
 // ─────────────────────────────────────────────
 // SKETCH ENGINE v4
@@ -666,7 +729,7 @@ function makeSketch(wrap){
     const lbl=createLabel({
       getBasePos:()=>segLabelXY(i),
       placeholder:'mm',title:'Measurement for this segment (drag ⠿ to move, corner to resize)',
-      color:'#0088cf',defW:52,defH:20,minW:34,maxW:160,minH:16,maxH:48,numeric:true
+      color:'#0088cf',defW:52,defH:20,minW:34,maxW:160,minH:16,maxH:48
     });
     svg.appendChild(lbl.fo);
     lbl.reposition();
@@ -706,7 +769,7 @@ function makeSketch(wrap){
     const lbl=createLabel({
       getBasePos:()=>angLabelXY(v,angLabels[v]?angLabels[v].mode:mode),
       placeholder:'',title:(mode==='int'?'Internal angle':'External angle')+' (drag ⠿ to move, corner to resize)',
-      color:'#082b51',defW:36,defH:18,minW:24,maxW:120,minH:14,maxH:40,numeric:true,suffix:'°'
+      color:'#082b51',defW:36,defH:18,minW:24,maxW:120,minH:14,maxH:40,suffix:'°'
     });
     svg.appendChild(lbl.fo);
     lbl.reposition();
@@ -822,15 +885,21 @@ function makeSketch(wrap){
     rmBg.addEventListener('click',e=>{e.stopPropagation();removeSelf();});
     rm.addEventListener('click',e=>{e.stopPropagation();removeSelf();});
 
-    const entry={g,remove:removeSelf};
+    const entry={g,a,reposition,remove:removeSelf};
     arrows.push(entry);
     return entry;
   }
 
   // ── full render ──
   function render(){
-    // remove lines and circles only (preserve foreignObjects)
-    svg.querySelectorAll('line,circle').forEach(e=>e.remove());
+    // Remove and redraw only the polyline's own <line>/<circle> elements —
+    // scoped to direct children of the svg so this doesn't also sweep up
+    // the colour-side arrow's <line> shaft and its drag-handle <circle>s,
+    // which live one level deeper inside their own <g class="arrow-el">.
+    // Removing those every render() (which used to happen unscoped) is what
+    // made the arrow lose its shaft/handles — leaving only its arrowhead and
+    // "✕" behind — as soon as another point was added or a vertex dragged.
+    svg.querySelectorAll(':scope > line, :scope > circle').forEach(e=>e.remove());
     // draw lines
     for(let i=0;i<pts.length-1;i++){
       const l=svgEl('line',{x1:pts[i].x,y1:pts[i].y,x2:pts[i+1].x,y2:pts[i+1].y,stroke:'#082b51','stroke-width':'2.5'});
@@ -860,8 +929,9 @@ function makeSketch(wrap){
         let x=Math.max(0,Math.min(W,e.clientX-r.left));
         let y=Math.max(0,Math.min(H,e.clientY-r.top));
         pts[i]={x,y};c.setAttribute('cx',x);c.setAttribute('cy',y);
-        // redraw lines
-        svg.querySelectorAll('line').forEach(l=>l.remove());
+        // redraw lines — same direct-child scoping as render() above, so
+        // this doesn't delete the colour-side arrow's line either.
+        svg.querySelectorAll(':scope > line').forEach(l=>l.remove());
         for(let j=0;j<pts.length-1;j++){
           const l=svgEl('line',{x1:pts[j].x,y1:pts[j].y,x2:pts[j+1].x,y2:pts[j+1].y,stroke:'#082b51','stroke-width':'2.5'});
           svg.insertBefore(l,svg.firstChild);
@@ -889,6 +959,15 @@ function makeSketch(wrap){
     pts.push({x:e.clientX-r.left,y:e.clientY-r.top});
     render();
   });
+
+  function clearAll(){
+    pts.length=0;
+    segLabels.forEach(sl=>{if(sl&&sl.fo.parentNode)sl.fo.parentNode.removeChild(sl.fo);});
+    segLabels.length=0;
+    Object.keys(angLabels).forEach(v=>removeAngLabel(+v));
+    arrows.slice().forEach(a=>a.remove());
+    render();
+  }
 
   return{
     isLocked(){return locked;},
@@ -920,15 +999,46 @@ function makeSketch(wrap){
       pts.pop();
       render();
     },
-    clear(){
-      pts.length=0;
-      segLabels.forEach(sl=>{if(sl&&sl.fo.parentNode)sl.fo.parentNode.removeChild(sl.fo);});
-      segLabels.length=0;
-      Object.keys(angLabels).forEach(v=>removeAngLabel(+v));
-      arrows.slice().forEach(a=>a.remove());
-      render();
+    clear(){clearAll();},
+    addArrow(){addArrow();},
+    // ── copy sketch (used by the item-level "Copy" button) ──
+    // Captures everything needed to reproduce this sketch elsewhere: point
+    // positions, each segment's entered length text, each angle label's
+    // mode+value, and every arrow's position/angle/length. Label *values*
+    // are read straight from their live <input>s since that's the only
+    // place the typed text lives.
+    getState(){
+      return{
+        locked,
+        pts:pts.map(p=>({x:p.x,y:p.y})),
+        segValues:segLabels.map(sl=>sl?sl.inp.value:null),
+        angValues:Object.fromEntries(Object.entries(angLabels).map(([v,l])=>[v,{mode:l.mode,value:l.inp.value}])),
+        arrows:arrows.map(en=>({x:en.a.x,y:en.a.y,angle:en.a.angle,length:en.a.length}))
+      };
     },
-    addArrow(){addArrow();}
+    loadState(state){
+      clearAll();
+      (state.pts||[]).forEach(p=>pts.push({x:p.x,y:p.y}));
+      render(); // lays down points/vertices; no labels yet
+      (state.segValues||[]).forEach((val,i)=>{
+        if(val===null||val===undefined)return;
+        if(i>=pts.length-1)return; // guard against a malformed/oversized state
+        addSegLabel(i);
+        segLabels[i].inp.value=val;
+      });
+      Object.entries(state.angValues||{}).forEach(([v,info])=>{
+        const vi=+v;
+        if(vi<=0||vi>=pts.length-1)return; // only interior vertices can carry an angle
+        addAngLabel(vi,info.mode);
+        if(angLabels[vi]) angLabels[vi].inp.value=info.value;
+      });
+      (state.arrows||[]).forEach(ar=>{
+        const en=addArrow();
+        en.a.x=ar.x;en.a.y=ar.y;en.a.angle=ar.angle;en.a.length=ar.length;
+        en.reposition();
+      });
+      locked=!!state.locked;
+    }
   };
 }
 
@@ -940,7 +1050,10 @@ function buildItem(n){
   card.innerHTML=`
     <div class="ih">
       <span class="inum">${n}</span>
-      <button type="button" class="ri np" title="Remove">✕</button>
+      <div class="ihbtns np">
+        <button type="button" class="cp" title="Copy this flashing to a new item">⧉ Copy</button>
+        <button type="button" class="ri" title="Remove">✕</button>
+      </div>
     </div>
     <div class="sscroll">
       <div class="sc"></div>
@@ -979,6 +1092,30 @@ function buildItem(n){
   clearBtn2.onclick=()=>sk.clear();
   card.querySelector('.arrow-b').onclick=()=>sk.addArrow();
   card.querySelector('.ri').onclick=()=>{card.remove();renum();};
+  // Exposed so the "Copy" button on any item (including future ones) can
+  // read/replay this item's sketch and refresh its own lock-state UI —
+  // see the copy handler below.
+  card._sketch=sk;
+  card._refreshLockUI=refreshLockUI;
+  card.querySelector('.cp').onclick=()=>{
+    // Same drawing and measurements, just needs a different length or
+    // colour for this particular piece: grab everything from this item...
+    const state=sk.getState();
+    const colour=card.querySelector('.fc').value;
+    const qty=card.querySelector('.fq').value;
+    const lengthPerPiece=card.querySelector('.fl').value;
+    const notes=card.querySelector('.fn').value;
+    // ...and drop it all into a brand-new item at the end of the list,
+    // ready to tweak whichever field is actually different this time.
+    const newCard=buildItem(document.querySelectorAll('.ic').length+1);
+    newCard._sketch.loadState(state);
+    newCard.querySelector('.fc').value=colour;
+    newCard.querySelector('.fq').value=qty||'1';
+    newCard.querySelector('.fl').value=lengthPerPiece;
+    newCard.querySelector('.fn').value=notes;
+    newCard._refreshLockUI();
+    if(typeof newCard.scrollIntoView==='function') newCard.scrollIntoView({behavior:'smooth',block:'center'});
+  };
   refreshLockUI();
   return card;
 }
@@ -1189,9 +1326,9 @@ function buildDiaryNoteText(){
 // not downloaded to this device as part of this flow.
 // window.__SM8_BACKEND__ is injected by the server when this page is served
 // through the add-on; falls back to the same Railway URL so the standalone
-// downloaded copy of this file works identically.
-// ─────────────────────────────────────────────
-const SM8_BACKEND=window.__SM8_BACKEND__||'https://jsj-order-tool-production.up.railway.app';
+// downloaded copy of this file works identically. (SM8_BACKEND itself is
+// declared near the top of the script now, since the shared-presets code
+// above also needs it.)
 
 // Rough device check used only to decide whether to pop the mailto: draft
 // after sending (see below) — doesn't need to be bulletproof, just needs to
