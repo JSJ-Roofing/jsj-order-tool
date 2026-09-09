@@ -34,6 +34,7 @@ const {
   PUBLIC_BASE_URL,
   TOKENS_FILE = '/data/tokens.json',
   PRESETS_FILE = '/data/presets.json',
+  SM8_TIMEZONE = 'Australia/Sydney',
   PORT = 3000,
 } = process.env;
 
@@ -115,6 +116,26 @@ async function sm8UploadFile(pathname, buffer, filename, mimeType) {
   let body;
   try { body = text ? JSON.parse(text) : null; } catch (e) { body = text; }
   return { status: r.status, body };
+}
+
+// ServiceM8's Attachment API takes a `timestamp` field but — unlike the
+// Note API, which stamps itself server-side in the account's own timezone
+// — displays whatever string you give it as literal local wall-clock time,
+// with no timezone conversion. Building that string from
+// `new Date().toISOString()` (UTC) therefore shows the PDF as having
+// landed 10-11 hours in the past relative to the diary note (Sydney is
+// UTC+10/+11), which is exactly the "PDF posts at yesterday 10pm, note
+// posts at today 8am" symptom. Formatting it in the account's actual local
+// timezone instead keeps the two in sync.
+function sm8LocalTimestamp(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: SM8_TIMEZONE,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const get = (type) => parts.find(p => p.type === type).value;
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`;
 }
 
 // ── Step 1: Activation URL — start OAuth ──
@@ -214,8 +235,10 @@ app.post('/submit-order', cors, async (req, res) => {
       const debug = { jobUUID, pdfBytes: pdfBuffer.length };
       try {
         // ServiceM8 wants a timestamp on the attachment record — some accounts
-        // reject/ignore the upload step without one.
-        const nowStamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        // reject/ignore the upload step without one. See sm8LocalTimestamp()
+        // above for why this is in local time rather than UTC.
+        const nowStamp = sm8LocalTimestamp();
+        debug.timestampSent = nowStamp;
 
         const attachRes = await sm8('Attachment.json', {
           method: 'POST',
@@ -246,9 +269,12 @@ app.post('/submit-order', cors, async (req, res) => {
         // `active` flag back to 0 server-side, even though the upload call
         // itself reports success — which hides it from the Diary/Files tab.
         // Explicitly re-activate the record after the upload to make it visible.
+        // Also re-sends the timestamp here — some accounts have been seen to
+        // reset it back to the upload's own server time on this step, which
+        // would undo the fix above if left out.
         const reactivateRes = await sm8(`Attachment/${attachmentUUID}.json`, {
           method: 'POST',
-          body: JSON.stringify({ active: true }),
+          body: JSON.stringify({ active: true, timestamp: nowStamp }),
         });
         debug.reactivateStatus = reactivateRes.status;
         debug.reactivateBody = reactivateRes.body;
@@ -257,7 +283,8 @@ app.post('/submit-order', cors, async (req, res) => {
         }
 
         // Read the record back to confirm what ServiceM8 actually has stored —
-        // this is the real proof of whether it will show up in the UI.
+        // this is the real proof of whether it will show up in the UI, and
+        // what timestamp it actually landed on.
         const verifyRes = await sm8(`Attachment/${attachmentUUID}.json`);
         debug.verifyStatus = verifyRes.status;
         debug.verifyBody = verifyRes.body;
